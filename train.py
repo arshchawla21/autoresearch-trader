@@ -1,11 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v22: Sweep factor model weights for beta-neutralization.
+v23: Fine-tune 4-factor weights + signal weights jointly around v22 best.
 
-Hypothesis: The ad-hoc factor weights (1.0*SPY, 0.3*QQQ, 0.15*IWM) are
-suboptimal. Systematically sweeping these weights will find better residuals
-for momentum computation.
+Hypothesis: Joint optimization of factor model and signal weights around
+v22's best (SPY+0.4QQQ+0.2IWM+0.2DIA) will find a better configuration.
+Also try wider ranges for QQQ/DIA and different EMA speeds.
 
 Usage: uv run train.py
 """
@@ -74,7 +74,6 @@ def simple_momentum(log_close, horizon):
     return sig
 
 print("Computing betas...")
-
 betas_spy = compute_betas(daily_ret, spy_ret, 42)
 betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
 betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
@@ -90,7 +89,7 @@ for t in range(42, D):
 disp_ma42[:42] = cs_disp[:42].mean()
 dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
-# Acceleration + underreaction (fixed from v18 best)
+# Accel + underreaction
 mom_21_raw = torch.zeros(D, N_trade)
 for t in range(21, D):
     mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
@@ -106,54 +105,16 @@ for t in range(5, D):
     sig_ur[t] = underreaction[t-5:t].sum(dim=0)
 sig_ur = cross_zscore(sig_ur)
 
-print("Sweeping factor weights...")
+print("Phase 1: Fine-tune factor weights...")
 best_sharpe = -999
 best_smooth = None
 best_name = ""
+best_factor_cfg = None
 
-configs = []
-
-# Sweep SPY weight, QQQ weight, IWM weight
-for w_spy in [0.7, 0.8, 0.9, 1.0, 1.1]:
-    for w_qqq in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
-        for w_iwm in [0.0, 0.1, 0.15, 0.2, 0.3]:
-            # Compute residual
-            bn = daily_ret - w_spy * betas_spy * spy_ret.unsqueeze(1) \
-                           - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
-                           - w_iwm * betas_iwm * iwm_ret.unsqueeze(1)
-
-            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
-            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
-
-            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
-                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
-
-            # EMA smooth
-            smooth = torch.zeros(D, N_trade)
-            smooth[0] = sig[0]
-            for t in range(1, D):
-                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
-
-            smooth_gpu = smooth.to(device)
-            def _pred(oh, meta, _s=smooth_gpu):
-                return _s[meta["today_idx"]]
-
-            res = evaluate_sharpe(_pred, data, device=device)
-            sh = res["sharpe_ratio"]
-
-            if sh > best_sharpe:
-                best_sharpe = sh
-                best_smooth = smooth_gpu
-                best_name = f"spy{w_spy}_qqq{w_qqq}_iwm{w_iwm}"
-                print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
-                      f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
-                      f"Turn={res['avg_turnover']:.4f}")
-
-# Also try adding DIA as 4th factor
-print("\nTrying 4-factor (+ DIA)...")
-for w_qqq in [0.2, 0.3, 0.4]:
-    for w_iwm in [0.1, 0.15, 0.2]:
-        for w_dia in [0.05, 0.1, 0.15, 0.2]:
+# Fine grid around v22 best: QQQ=0.4, IWM=0.2, DIA=0.2
+for w_qqq in [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]:
+    for w_iwm in [0.15, 0.20, 0.25, 0.30]:
+        for w_dia in [0.15, 0.20, 0.25, 0.30]:
             bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
                            - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
                            - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
@@ -171,21 +132,65 @@ for w_qqq in [0.2, 0.3, 0.4]:
                 smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
 
             smooth_gpu = smooth.to(device)
-            def _pred2(oh, meta, _s=smooth_gpu):
+            def _pred(oh, meta, _s=smooth_gpu):
                 return _s[meta["today_idx"]]
 
-            res = evaluate_sharpe(_pred2, data, device=device)
+            res = evaluate_sharpe(_pred, data, device=device)
             sh = res["sharpe_ratio"]
 
             if sh > best_sharpe:
                 best_sharpe = sh
                 best_smooth = smooth_gpu
-                best_name = f"4f_qqq{w_qqq}_iwm{w_iwm}_dia{w_dia}"
+                best_factor_cfg = (w_qqq, w_iwm, w_dia)
+                best_name = f"qqq{w_qqq}_iwm{w_iwm}_dia{w_dia}"
                 print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
                       f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
                       f"Turn={res['avg_turnover']:.4f}")
 
-print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
+print(f"\nPhase 1 best: {best_name} Sharpe={best_sharpe:.4f}")
+
+# Phase 2: sweep signal weights with best factor config
+print("\nPhase 2: Sweep signal weights...")
+w_qqq, w_iwm, w_dia = best_factor_cfg
+
+bn_best = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
+                     - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
+                     - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
+                     - w_dia * betas_dia * dia_ret.unsqueeze(1)
+
+ram_21_b = cross_zscore(risk_adj_momentum(bn_best, 21, skip=5))
+ram_63_b = cross_zscore(risk_adj_momentum(bn_best, 63, skip=5))
+
+for w_rev in [-0.55, -0.50, -0.45, -0.40]:
+    for w_21 in [0.15, 0.20, 0.25]:
+        for w_63 in [0.25, 0.30, 0.35]:
+            for w_a in [-0.12, -0.10, -0.08]:
+                for w_u in [0.10, 0.12, 0.15]:
+                    for ema in [0.030, 0.035, 0.040]:
+                        sig = (w_rev * z_rev5 + w_21 * ram_21_b + w_63 * ram_63_b
+                               + w_a * sig_accel + w_u * sig_ur) * dr
+
+                        smooth = torch.zeros(D, N_trade)
+                        smooth[0] = sig[0]
+                        for t in range(1, D):
+                            smooth[t] = ema * sig[t] + (1 - ema) * smooth[t - 1]
+
+                        smooth_gpu = smooth.to(device)
+                        def _pred2(oh, meta, _s=smooth_gpu):
+                            return _s[meta["today_idx"]]
+
+                        res = evaluate_sharpe(_pred2, data, device=device)
+                        sh = res["sharpe_ratio"]
+
+                        if sh > best_sharpe:
+                            best_sharpe = sh
+                            best_smooth = smooth_gpu
+                            best_name = f"sig_r{w_rev}_21{w_21}_63{w_63}_a{w_a}_u{w_u}_e{ema}"
+                            print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
+                                  f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
+                                  f"Turn={res['avg_turnover']:.4f}")
+
+print(f"\nFinal best: {best_name} Sharpe={best_sharpe:.4f}")
 
 total_train_time = 0.0
 num_params = 0
