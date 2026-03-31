@@ -1,12 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v16: Multi-factor residual momentum — neutralize individual stock returns
-against their sector ETF before computing momentum. This isolates
-idiosyncratic alpha from sector/market beta.
+v17: Add price acceleration + lead-lag signals on top of the 2-factor base.
 
-Hypothesis: Sector-neutralized residual momentum captures purer stock-specific
-signals, reducing drawdowns from correlated sector moves.
+Hypothesis: Price acceleration (2nd derivative — momentum of momentum) and
+ETF-to-stock lead-lag relationships add orthogonal alpha to the current
+2-factor beta-neutral momentum signal.
 
 Usage: uv run train.py
 """
@@ -31,28 +30,14 @@ ohlcv = data["ohlcv"]
 tradeable_idx = data["tradeable_indices"]
 N_trade = data["num_tradeable"]
 D = ohlcv.shape[0]
-tickers = data["tradeable_tickers"]
 
 close = ohlcv[:, tradeable_idx, C]
 log_close = torch.log(close.clamp(min=1e-8))
 daily_ret = torch.zeros(D, N_trade)
 daily_ret[1:] = log_close[1:] - log_close[:-1]
 
-print(f"Tickers: {tickers}")
-
-# Map each tradeable asset to its sector ETF
-SECTOR_MAP = {
-    "SPY": "SPY", "QQQ": "SPY", "IWM": "SPY", "DIA": "SPY",
-    "XLF": "SPY", "XLE": "SPY", "XLK": "SPY", "XLV": "SPY",
-    "XLI": "SPY", "XLP": "SPY", "XLU": "SPY", "XLY": "SPY", "XLB": "SPY",
-    "AAPL": "XLK", "MSFT": "XLK", "GOOGL": "XLK", "NVDA": "XLK", "META": "XLK",
-    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY",
-    "JPM": "XLF", "V": "XLF", "MA": "XLF", "BAC": "XLF",
-    "JNJ": "XLV", "UNH": "XLV",
-    "PG": "XLP",
-}
-
-ticker_to_idx = {t: i for i, t in enumerate(tickers)}
+spy_ret = daily_ret[:, 0]
+qqq_ret = daily_ret[:, 1]
 
 def cross_zscore(x):
     mu = x.mean(dim=1, keepdim=True)
@@ -86,45 +71,44 @@ def simple_momentum(log_close, horizon):
     sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
     return sig
 
-print("Computing sector-neutral residuals...")
+print("Computing signals...")
 
-# For each stock, compute beta to its sector ETF, then get residual returns
-sector_neutral_ret = daily_ret.clone()
-beta_lookback = 42
-
-for ticker in tickers:
-    j = ticker_to_idx[ticker]
-    sector = SECTOR_MAP.get(ticker, "SPY")
-    ref_idx = ticker_to_idx.get(sector, 0)
-    if ref_idx == j:
-        continue
-    ref_ret = daily_ret[:, ref_idx]
-    for t in range(beta_lookback, D):
-        ref_w = ref_ret[t - beta_lookback:t]
-        ref_dm = ref_w - ref_w.mean()
-        ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
-        asset_w = daily_ret[t - beta_lookback:t, j]
-        cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
-        beta = cov / ref_var
-        sector_neutral_ret[t, j] = daily_ret[t, j] - beta * ref_ret[t]
-
-# Also compute 2-factor residuals (best from exp15)
-spy_ret = daily_ret[:, 0]
-qqq_ret = daily_ret[:, 1]
+# 2-factor beta-neutral (best from exp15)
 betas_spy = compute_betas(daily_ret, spy_ret, 42)
 betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
 bn_2f = daily_ret - betas_spy * spy_ret.unsqueeze(1) - 0.3 * betas_qqq * qqq_ret.unsqueeze(1)
 
-# Momentum signals on sector-neutral residuals
-ram_sn_21 = cross_zscore(risk_adj_momentum(sector_neutral_ret, 21, skip=5))
-ram_sn_63 = cross_zscore(risk_adj_momentum(sector_neutral_ret, 63, skip=5))
-
-# Momentum signals on 2-factor residuals
 ram_2f_21 = cross_zscore(risk_adj_momentum(bn_2f, 21, skip=5))
 ram_2f_63 = cross_zscore(risk_adj_momentum(bn_2f, 63, skip=5))
-
-# Reversal
 z_rev5 = cross_zscore(simple_momentum(log_close, 5))
+
+# Price acceleration: change in 21d momentum over 10 days
+# mom_21(t) - mom_21(t-10), cross-sectionally z-scored
+mom_21_raw = torch.zeros(D, N_trade)
+for t in range(21, D):
+    mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
+accel_10 = torch.zeros(D, N_trade)
+accel_10[31:] = mom_21_raw[31:] - mom_21_raw[21:-10]  # fix: need proper indexing
+for t in range(31, D):
+    accel_10[t] = mom_21_raw[t] - mom_21_raw[t - 10]
+z_accel = cross_zscore(accel_10)
+
+# Lead-lag: how much does today's SPY/QQQ return predict tomorrow's stock return?
+# Use rolling correlation between lagged ETF returns and stock returns
+# Simpler version: use yesterday's SPY return as a signal
+spy_lag1 = torch.zeros(D, N_trade)
+spy_lag1[1:] = spy_ret[:-1].unsqueeze(1).expand(-1, N_trade)
+# Cross-sectionally, this is the same for all assets, so z-score won't help
+# Instead: how much did each asset "miss" the market move? (underreaction signal)
+# Expected return = beta * SPY_return, actual = daily_ret
+# Underreaction = expected - actual (positive = stock hasn't caught up yet)
+expected_ret = betas_spy * spy_ret.unsqueeze(1)
+underreaction = expected_ret - daily_ret  # positive = stock lagged behind market
+# Smooth over 3 days
+ur_3d = torch.zeros(D, N_trade)
+for t in range(3, D):
+    ur_3d[t] = underreaction[t-3:t].sum(dim=0)
+z_underreact = cross_zscore(ur_3d)
 
 # Dispersion scaling
 cs_disp = daily_ret.std(dim=1)
@@ -134,28 +118,39 @@ for t in range(42, D):
 disp_ma42[:42] = cs_disp[:42].mean()
 dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
+# Base signal (exp15 best)
+base = -0.50 * z_rev5 + 0.20 * ram_2f_21 + 0.30 * ram_2f_63
+
 print("Testing configurations...")
 best_sharpe = -999
 best_smooth = None
 best_name = ""
 
 configs = [
-    # Sector-neutral momentum
-    ("sn_base", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.035),
-    ("sn_rev45", (-0.45 * z_rev5 + 0.22 * ram_sn_21 + 0.33 * ram_sn_63) * dr, 0.035),
-    ("sn_rev55", (-0.55 * z_rev5 + 0.18 * ram_sn_21 + 0.27 * ram_sn_63) * dr, 0.035),
-    ("sn_e03", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.03),
-    ("sn_e04", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.04),
-    ("sn_e05", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.05),
-    ("sn_equal", (-0.50 * z_rev5 + 0.25 * ram_sn_21 + 0.25 * ram_sn_63) * dr, 0.035),
+    # Reference
+    ("2f_ref", base * dr, 0.035),
 
-    # Ensemble: sector-neutral + 2-factor
-    ("ens_50_50", (-0.50 * z_rev5 + 0.10 * ram_sn_21 + 0.15 * ram_sn_63 + 0.10 * ram_2f_21 + 0.15 * ram_2f_63) * dr, 0.035),
-    ("ens_30_70", (-0.50 * z_rev5 + 0.06 * ram_sn_21 + 0.09 * ram_sn_63 + 0.14 * ram_2f_21 + 0.21 * ram_2f_63) * dr, 0.035),
-    ("ens_70_30", (-0.50 * z_rev5 + 0.14 * ram_sn_21 + 0.21 * ram_sn_63 + 0.06 * ram_2f_21 + 0.09 * ram_2f_63) * dr, 0.035),
+    # Add acceleration
+    ("accel_05", (base + 0.05 * z_accel) * dr, 0.035),
+    ("accel_10", (base + 0.10 * z_accel) * dr, 0.035),
+    ("accel_15", (base + 0.15 * z_accel) * dr, 0.035),
+    ("accel_n05", (base - 0.05 * z_accel) * dr, 0.035),
+    ("accel_n10", (base - 0.10 * z_accel) * dr, 0.035),
 
-    # Exp15 reference (2-factor only)
-    ("2f_ref", (-0.50 * z_rev5 + 0.20 * ram_2f_21 + 0.30 * ram_2f_63) * dr, 0.035),
+    # Add underreaction
+    ("ur_05", (base + 0.05 * z_underreact) * dr, 0.035),
+    ("ur_10", (base + 0.10 * z_underreact) * dr, 0.035),
+    ("ur_15", (base + 0.15 * z_underreact) * dr, 0.035),
+    ("ur_n05", (base - 0.05 * z_underreact) * dr, 0.035),
+    ("ur_n10", (base - 0.10 * z_underreact) * dr, 0.035),
+
+    # Both
+    ("both_05", (base + 0.05 * z_accel + 0.05 * z_underreact) * dr, 0.035),
+    ("both_10", (base + 0.10 * z_accel + 0.10 * z_underreact) * dr, 0.035),
+    ("both_n", (base - 0.05 * z_accel + 0.10 * z_underreact) * dr, 0.035),
+
+    # Acceleration only (replace some momentum weight)
+    ("accel_replace", (-0.50 * z_rev5 + 0.15 * ram_2f_21 + 0.25 * ram_2f_63 + 0.10 * z_accel) * dr, 0.035),
 ]
 
 for name, raw_sig, ema_a in configs:
