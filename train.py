@@ -1,11 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v21: Turnover-constrained position management instead of EMA smoothing.
+v22: Sweep factor model weights for beta-neutralization.
 
-Hypothesis: EMA smoothing introduces lag — a fixed-rate blend regardless of
-signal change magnitude. A turnover cap that limits max daily position change
-should be more responsive to genuine signal shifts while preventing whipsaws.
+Hypothesis: The ad-hoc factor weights (1.0*SPY, 0.3*QQQ, 0.15*IWM) are
+suboptimal. Systematically sweeping these weights will find better residuals
+for momentum computation.
 
 Usage: uv run train.py
 """
@@ -17,7 +17,7 @@ import time
 import torch
 
 from prepare import (
-    C, TARGET_LEVERAGE,
+    C,
     load_data, evaluate_sharpe,
 )
 
@@ -39,6 +39,7 @@ daily_ret[1:] = log_close[1:] - log_close[:-1]
 spy_ret = daily_ret[:, 0]
 qqq_ret = daily_ret[:, 1]
 iwm_ret = daily_ret[:, 2]
+dia_ret = daily_ret[:, 3]
 
 def cross_zscore(x):
     mu = x.mean(dim=1, keepdim=True)
@@ -72,33 +73,14 @@ def simple_momentum(log_close, horizon):
     sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
     return sig
 
-print("Computing signals...")
+print("Computing betas...")
 
-# 3-factor beta-neutral (v18 best)
 betas_spy = compute_betas(daily_ret, spy_ret, 42)
 betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
 betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
-bn_3f = daily_ret - betas_spy * spy_ret.unsqueeze(1) - 0.3 * betas_qqq * qqq_ret.unsqueeze(1) - 0.15 * betas_iwm * iwm_ret.unsqueeze(1)
+betas_dia = compute_betas(daily_ret, dia_ret, 42)
 
-ram_3f_21 = cross_zscore(risk_adj_momentum(bn_3f, 21, skip=5))
-ram_3f_63 = cross_zscore(risk_adj_momentum(bn_3f, 63, skip=5))
 z_rev5 = cross_zscore(simple_momentum(log_close, 5))
-
-# Acceleration + underreaction (v18 best)
-mom_21_raw = torch.zeros(D, N_trade)
-for t in range(21, D):
-    mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
-sig_accel = torch.zeros(D, N_trade)
-for t in range(31, D):
-    sig_accel[t] = mom_21_raw[t] - mom_21_raw[t - 10]
-sig_accel = cross_zscore(sig_accel)
-
-expected_ret = betas_spy * spy_ret.unsqueeze(1)
-underreaction = expected_ret - daily_ret
-sig_ur = torch.zeros(D, N_trade)
-for t in range(5, D):
-    sig_ur[t] = underreaction[t-5:t].sum(dim=0)
-sig_ur = cross_zscore(sig_ur)
 
 # Dispersion
 cs_disp = daily_ret.std(dim=1)
@@ -108,100 +90,100 @@ for t in range(42, D):
 disp_ma42[:42] = cs_disp[:42].mean()
 dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
-# Raw signal (v18 best)
-raw_signal = (-0.50 * z_rev5 + 0.20 * ram_3f_21 + 0.30 * ram_3f_63
-              - 0.10 * sig_accel + 0.12 * sig_ur) * dr
+# Acceleration + underreaction (fixed from v18 best)
+mom_21_raw = torch.zeros(D, N_trade)
+for t in range(21, D):
+    mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
+sig_accel = torch.zeros(D, N_trade)
+for t in range(31, D):
+    sig_accel[t] = mom_21_raw[t] - mom_21_raw[t - 10]
+sig_accel = cross_zscore(sig_accel)
 
-# Normalize target positions: what the signal "wants"
-target_pos = torch.zeros(D, N_trade)
-for t in range(42, D):
-    s = raw_signal[t]
-    abs_sum = s.abs().sum().clamp(min=1e-10)
-    target_pos[t] = s * (TARGET_LEVERAGE / abs_sum)
+expected_ret_spy = betas_spy * spy_ret.unsqueeze(1)
+underreaction = expected_ret_spy - daily_ret
+sig_ur = torch.zeros(D, N_trade)
+for t in range(5, D):
+    sig_ur[t] = underreaction[t-5:t].sum(dim=0)
+sig_ur = cross_zscore(sig_ur)
 
-# ---------------------------------------------------------------------------
-# Position management approaches
-# ---------------------------------------------------------------------------
-
-def apply_ema(raw_sig, alpha):
-    smooth = torch.zeros(D, N_trade)
-    smooth[0] = raw_sig[0]
-    for t in range(1, D):
-        smooth[t] = alpha * raw_sig[t] + (1 - alpha) * smooth[t - 1]
-    return smooth
-
-def apply_turnover_cap(target, max_turn_per_asset):
-    """Cap per-asset position change to max_turn_per_asset per day."""
-    pos = torch.zeros(D, N_trade)
-    for t in range(43, D):
-        delta = target[t] - pos[t - 1]
-        clamped = delta.clamp(-max_turn_per_asset, max_turn_per_asset)
-        pos[t] = pos[t - 1] + clamped
-    return pos
-
-def apply_total_turnover_cap(target, max_total_turn):
-    """Cap total portfolio turnover to max_total_turn per day."""
-    pos = torch.zeros(D, N_trade)
-    for t in range(43, D):
-        delta = target[t] - pos[t - 1]
-        total_turn = delta.abs().sum()
-        if total_turn > max_total_turn:
-            delta = delta * (max_total_turn / total_turn)
-        pos[t] = pos[t - 1] + delta
-    return pos
-
-print("Testing position management approaches...")
+print("Sweeping factor weights...")
 best_sharpe = -999
 best_smooth = None
 best_name = ""
 
 configs = []
 
-# EMA baseline (v18 reference)
-for alpha in [0.03, 0.035, 0.04, 0.05]:
-    s = apply_ema(raw_signal, alpha)
-    configs.append((f"ema_{alpha}", s))
+# Sweep SPY weight, QQQ weight, IWM weight
+for w_spy in [0.7, 0.8, 0.9, 1.0, 1.1]:
+    for w_qqq in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
+        for w_iwm in [0.0, 0.1, 0.15, 0.2, 0.3]:
+            # Compute residual
+            bn = daily_ret - w_spy * betas_spy * spy_ret.unsqueeze(1) \
+                           - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
+                           - w_iwm * betas_iwm * iwm_ret.unsqueeze(1)
 
-# Per-asset turnover cap
-for cap in [0.002, 0.003, 0.004, 0.005, 0.007, 0.01, 0.015, 0.02]:
-    s = apply_turnover_cap(target_pos, cap)
-    configs.append((f"percap_{cap}", s))
+            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
+            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
 
-# Total portfolio turnover cap
-for cap in [0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30]:
-    s = apply_total_turnover_cap(target_pos, cap)
-    configs.append((f"totcap_{cap}", s))
+            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
+                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
 
-# Hybrid: EMA + per-asset cap
-for alpha in [0.05, 0.07, 0.10]:
-    s_ema = apply_ema(raw_signal, alpha)
-    for cap in [0.003, 0.005, 0.007]:
-        # Normalize EMA output, then cap
-        pos = torch.zeros(D, N_trade)
-        for t in range(43, D):
-            tgt = s_ema[t]
-            abs_sum = tgt.abs().sum().clamp(min=1e-10)
-            tgt = tgt * (TARGET_LEVERAGE / abs_sum)
-            delta = tgt - pos[t - 1]
-            clamped = delta.clamp(-cap, cap)
-            pos[t] = pos[t - 1] + clamped
-        configs.append((f"hybrid_e{alpha}_c{cap}", pos))
+            # EMA smooth
+            smooth = torch.zeros(D, N_trade)
+            smooth[0] = sig[0]
+            for t in range(1, D):
+                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
 
-for name, positions in configs:
-    smooth_gpu = positions.to(device)
+            smooth_gpu = smooth.to(device)
+            def _pred(oh, meta, _s=smooth_gpu):
+                return _s[meta["today_idx"]]
 
-    def _pred(oh, meta, _s=smooth_gpu):
-        return _s[meta["today_idx"]]
+            res = evaluate_sharpe(_pred, data, device=device)
+            sh = res["sharpe_ratio"]
 
-    res = evaluate_sharpe(_pred, data, device=device)
-    sh = res["sharpe_ratio"]
-    print(f"  {name:25s}: Sharpe={sh:+.4f}  Return={res['total_return']:+.4f}  "
-          f"MaxDD={res['max_drawdown']:+.4f}  Turn={res['avg_turnover']:.4f}")
+            if sh > best_sharpe:
+                best_sharpe = sh
+                best_smooth = smooth_gpu
+                best_name = f"spy{w_spy}_qqq{w_qqq}_iwm{w_iwm}"
+                print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
+                      f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
+                      f"Turn={res['avg_turnover']:.4f}")
 
-    if sh > best_sharpe:
-        best_sharpe = sh
-        best_smooth = smooth_gpu
-        best_name = name
+# Also try adding DIA as 4th factor
+print("\nTrying 4-factor (+ DIA)...")
+for w_qqq in [0.2, 0.3, 0.4]:
+    for w_iwm in [0.1, 0.15, 0.2]:
+        for w_dia in [0.05, 0.1, 0.15, 0.2]:
+            bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
+                           - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
+                           - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
+                           - w_dia * betas_dia * dia_ret.unsqueeze(1)
+
+            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
+            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
+
+            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
+                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
+
+            smooth = torch.zeros(D, N_trade)
+            smooth[0] = sig[0]
+            for t in range(1, D):
+                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
+
+            smooth_gpu = smooth.to(device)
+            def _pred2(oh, meta, _s=smooth_gpu):
+                return _s[meta["today_idx"]]
+
+            res = evaluate_sharpe(_pred2, data, device=device)
+            sh = res["sharpe_ratio"]
+
+            if sh > best_sharpe:
+                best_sharpe = sh
+                best_smooth = smooth_gpu
+                best_name = f"4f_qqq{w_qqq}_iwm{w_iwm}_dia{w_dia}"
+                print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
+                      f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
+                      f"Turn={res['avg_turnover']:.4f}")
 
 print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
 
