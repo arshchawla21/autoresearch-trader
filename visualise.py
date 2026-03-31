@@ -184,9 +184,22 @@ def plot_stock(data, weights, signals, ticker, show_train=False):
     passive_weight = 1.0 / N_trade
     passive_pnl = passive_weight * fwd
 
+    # Full-size strategy: same timing/direction, but scaled to 100% capital
+    # Rescale position so average |weight| = 1.0, capped at [-1, 1]
+    avg_abs_pos = np.abs(pos).mean()
+    if avg_abs_pos > 1e-8:
+        full_pos = np.clip(pos / avg_abs_pos, -1.0, 1.0)
+    else:
+        full_pos = np.zeros_like(pos)
+    full_turnover = np.zeros_like(full_pos)
+    full_turnover[1:] = np.abs(full_pos[1:] - full_pos[:-1])
+    full_tc = TRANSACTION_COST_BPS / 10000 * full_turnover
+    full_pnl = full_pos * fwd - full_tc
+
     # Cumulative returns
     cum_strategy = np.cumprod(1 + daily_pnl) - 1
     cum_passive = np.cumprod(1 + passive_pnl) - 1
+    cum_full = np.cumprod(1 + full_pnl) - 1
     buy_hold_ret = price / price[0] - 1
 
     # Mark test boundary
@@ -264,21 +277,18 @@ def plot_stock(data, weights, signals, ticker, show_train=False):
     ax.set_ylabel("Signal", fontsize=11)
     ax.set_title("Raw Composite Signal (pre-EMA)", fontsize=12, pad=8)
 
-    # Panel 4: Cumulative P&L — fair comparison at portfolio-weight scale
+    # Panel 4: Full-size strategy vs buy-and-hold (both at 100% capital)
     ax = axes[3]
-    ax.plot(d, cum_strategy * 100, color="#2ecc71", linewidth=1.8,
-            label=f"Strategy (active weight)")
-    ax.plot(d, cum_passive * 100, color="#f39c12", linewidth=1.2, alpha=0.7,
-            linestyle="--", label=f"Passive (1/{N_trade} = {passive_weight:.1%} weight)")
+    ax.plot(d, cum_full * 100, color="#2ecc71", linewidth=1.8,
+            label=f"Strategy @ 100% (same timing, full size)")
+    ax.plot(d, buy_hold_ret * 100, color="#3498db", linewidth=1.5, alpha=0.7,
+            label="Buy & hold (100%)")
+    ax.plot(d, cum_strategy * 100, color="#2ecc71", linewidth=1.0, alpha=0.3,
+            linestyle=":", label=f"Strategy @ portfolio weight (~{passive_weight:.1%})")
     ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
     ax.set_ylabel("Cumulative Return (%)", fontsize=11)
-    ax.set_title(f"Strategy vs Passive Equal-Weight — this stock's portfolio contribution", fontsize=12, pad=8)
+    ax.set_title("Strategy (scaled to 100%) vs Buy & Hold", fontsize=12, pad=8)
     ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
-    # Secondary axis: 100% buy-and-hold for context
-    ax2 = ax.twinx()
-    ax2.plot(d, buy_hold_ret * 100, color="#3498db", linewidth=1.0, alpha=0.3)
-    ax2.set_ylabel(f"100% Buy & Hold (%)", fontsize=9, color="#3498db", alpha=0.5)
-    ax2.tick_params(axis="y", labelcolor="#3498db", labelsize=8)
 
     # Panel 5: Daily P&L bars
     ax = axes[4]
@@ -298,25 +308,28 @@ def plot_stock(data, weights, signals, ticker, show_train=False):
     test_mask = np.array([i >= (test_start - start) for i in range(len(d))])
     if test_mask.any():
         test_pnl = daily_pnl[test_mask]
-        test_passive = passive_pnl[test_mask]
-        test_sr = (test_pnl.mean() / test_pnl.std() * np.sqrt(252)) if test_pnl.std() > 1e-10 else 0
+        test_full_pnl = full_pnl[test_mask]
         test_cum = np.prod(1 + test_pnl) - 1
-        passive_cum = np.prod(1 + test_passive) - 1
+        full_cum = np.prod(1 + test_full_pnl) - 1
         bh_cum = price[test_mask][-1] / price[test_mask][0] - 1
+        full_sr = (test_full_pnl.mean() / test_full_pnl.std() * np.sqrt(252)) if test_full_pnl.std() > 1e-10 else 0
         avg_pos = np.mean(np.abs(pos[test_mask]))
-        avg_turn = np.mean(turnover[test_mask])
+        avg_full_pos = np.mean(np.abs(full_pos[test_mask]))
 
         stats_text = (
             f"Test period — {ticker}:\n"
-            f"  Strategy contribution: {test_cum*100:+.2f}%\n"
-            f"  Passive (1/{N_trade}):       {passive_cum*100:+.2f}%\n"
-            f"  Alpha vs passive:     {(test_cum - passive_cum)*100:+.2f}%\n"
-            f"  100% buy & hold:      {bh_cum*100:+.2f}%\n"
-            f"  ─────────────────────────\n"
-            f"  Sharpe (this stock):  {test_sr:.2f}\n"
-            f"  Avg |weight|:         {avg_pos:.4f} ({avg_pos*100:.1f}%)\n"
-            f"  Avg turnover:         {avg_turn:.4f}\n"
-            f"  Days long / short:    {np.sum(pos[test_mask] > 0.001)} / {np.sum(pos[test_mask] < -0.001)}"
+            f"  ── At 100% capital ──────────\n"
+            f"  Strategy (full):  {full_cum*100:+.2f}%\n"
+            f"  Buy & hold:       {bh_cum*100:+.2f}%\n"
+            f"  Alpha:            {(full_cum - bh_cum)*100:+.2f}%\n"
+            f"  Sharpe (full):    {full_sr:.2f}\n"
+            f"  ── At portfolio weight ──────\n"
+            f"  Contribution:     {test_cum*100:+.2f}%\n"
+            f"  Avg |weight|:     {avg_pos:.4f} ({avg_pos*100:.1f}%)\n"
+            f"  ── Position info ───────────\n"
+            f"  Days long:        {np.sum(pos[test_mask] > 0.001)}\n"
+            f"  Days short:       {np.sum(pos[test_mask] < -0.001)}\n"
+            f"  Days flat:        {np.sum(np.abs(pos[test_mask]) <= 0.001)}"
         )
         fig.text(0.98, 0.98, stats_text, transform=fig.transFigure,
                  fontsize=9, verticalalignment="top", horizontalalignment="right",
