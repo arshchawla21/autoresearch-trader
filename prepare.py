@@ -1,389 +1,374 @@
 """
-One-time data preparation for autoresearch experiments.
-Downloads data shards and trains a BPE tokenizer.
+Data preparation and evaluation harness for autoresearch-trader.
+Downloads raw OHLCV market data and provides the fixed backtesting metric.
 
 Usage:
-    python prepare.py                  # full prep (download + tokenizer)
-    python prepare.py --num-shards 8   # download only 8 shards (for testing)
+    python prepare.py                  # full prep (download + process)
+    python prepare.py --tickers SPY    # single ticker for quick testing
 
-Data and tokenizer are stored in ~/.cache/autoresearch/.
+Data is stored in ~/.cache/autoresearch-trader/.
+
+DO NOT MODIFY THIS FILE during experimentation.
+The only file you edit is train.py.
 """
 
 import os
 import sys
 import time
-import math
-import argparse
 import pickle
-from multiprocessing import Pool
+from datetime import datetime
 
-import requests
-import pyarrow.parquet as pq
-import rustbpe
-import tiktoken
+import numpy as np
+import pandas as pd
 import torch
+import yfinance as yf
 
 # ---------------------------------------------------------------------------
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
+TIME_BUDGET = 300          # training time budget in seconds (5 minutes)
+TRAIN_END = "2025-06-30"   # last date in training set (inclusive)
+TEST_START = "2025-07-01"  # first date in test set
+DATA_START = "2021-01-01"  # start of data download (~5 years)
+TRANSACTION_COST_BPS = 10  # 10 basis points per unit turnover
+TARGET_LEVERAGE = 1.0      # gross leverage for position normalization
+
+# OHLCV channel indices (convenience constants for train.py)
+O, H, L, C, V = 0, 1, 2, 3, 4
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch-trader")
 DATA_DIR = os.path.join(CACHE_DIR, "data")
-TOKENIZER_DIR = os.path.join(CACHE_DIR, "tokenizer")
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
-VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
-VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
-VOCAB_SIZE = 8192
+PROCESSED_DIR = os.path.join(CACHE_DIR, "processed")
 
-# BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+# Tradeable universe: liquid ETFs + major stocks
+TRADEABLE_TICKERS = [
+    # Broad market ETFs
+    "SPY", "QQQ", "IWM", "DIA",
+    # Sector ETFs
+    "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLU", "XLY", "XLB",
+    # Top stocks
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
+    "JPM", "V", "JNJ", "UNH", "PG", "HD", "MA", "BAC",
+]
 
-SPECIAL_TOKENS = [f"<|reserved_{i}|>" for i in range(4)]
-BOS_TOKEN = "<|reserved_0|>"
+# Reference-only tickers (not tradeable, available as signals)
+MACRO_TICKERS = [
+    "^VIX",    # Volatility index (fear gauge)
+    "^TNX",    # 10-year Treasury yield
+    "GLD",     # Gold ETF
+    "UUP",     # US Dollar index ETF
+    "TLT",     # Long-term Treasury ETF
+    "HYG",     # High-yield corporate bond ETF
+]
 
 # ---------------------------------------------------------------------------
 # Data download
 # ---------------------------------------------------------------------------
 
-def download_single_shard(index):
-    """Download one parquet shard with retries. Returns True on success."""
-    filename = f"shard_{index:05d}.parquet"
-    filepath = os.path.join(DATA_DIR, filename)
-    if os.path.exists(filepath):
-        return True
-
-    url = f"{BASE_URL}/{filename}"
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            temp_path = filepath + ".tmp"
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-            os.rename(temp_path, filepath)
-            print(f"  Downloaded {filename}")
-            return True
-        except (requests.RequestException, IOError) as e:
-            print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
-            for path in [filepath + ".tmp", filepath]:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-            if attempt < max_attempts:
-                time.sleep(2 ** attempt)
-    return False
-
-
-def download_data(num_shards, download_workers=8):
-    """Download training shards + pinned validation shard."""
+def download_data(tradeable=None):
+    """Download raw OHLCV data from Yahoo Finance. Returns DataFrame."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    num_train = min(num_shards, MAX_SHARD)
-    ids = list(range(num_train))
-    if VAL_SHARD not in ids:
-        ids.append(VAL_SHARD)
+    cache_path = os.path.join(DATA_DIR, "raw_ohlcv.parquet")
 
-    # Count what's already downloaded
-    existing = sum(1 for i in ids if os.path.exists(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet")))
-    if existing == len(ids):
-        print(f"Data: all {len(ids)} shards already downloaded at {DATA_DIR}")
-        return
+    if os.path.exists(cache_path):
+        print(f"Data: cached at {cache_path}")
+        return pd.read_parquet(cache_path)
 
-    needed = len(ids) - existing
-    print(f"Data: downloading {needed} shards ({existing} already exist)...")
+    trade_tickers = tradeable or TRADEABLE_TICKERS
+    all_tickers = list(dict.fromkeys(trade_tickers + MACRO_TICKERS))
 
-    workers = max(1, min(download_workers, needed))
-    with Pool(processes=workers) as pool:
-        results = pool.map(download_single_shard, ids)
-
-    ok = sum(1 for r in results if r)
-    print(f"Data: {ok}/{len(ids)} shards ready at {DATA_DIR}")
-
-# ---------------------------------------------------------------------------
-# Tokenizer training
-# ---------------------------------------------------------------------------
-
-def list_parquet_files():
-    """Return sorted list of parquet file paths in the data directory."""
-    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".parquet") and not f.endswith(".tmp"))
-    return [os.path.join(DATA_DIR, f) for f in files]
-
-
-def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
-    """Yield documents from training split (all shards except pinned val shard)."""
-    parquet_paths = [p for p in list_parquet_files() if not p.endswith(VAL_FILENAME)]
-    nchars = 0
-    for filepath in parquet_paths:
-        pf = pq.ParquetFile(filepath)
-        for rg_idx in range(pf.num_row_groups):
-            rg = pf.read_row_group(rg_idx)
-            for text in rg.column("text").to_pylist():
-                doc = text[:doc_cap] if len(text) > doc_cap else text
-                nchars += len(doc)
-                yield doc
-                if nchars >= max_chars:
-                    return
-
-
-def train_tokenizer():
-    """Train BPE tokenizer using rustbpe, save as tiktoken pickle."""
-    tokenizer_pkl = os.path.join(TOKENIZER_DIR, "tokenizer.pkl")
-    token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
-
-    if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
-        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
-        return
-
-    os.makedirs(TOKENIZER_DIR, exist_ok=True)
-
-    parquet_files = list_parquet_files()
-    if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
-        sys.exit(1)
-
-    # --- Train with rustbpe ---
-    print("Tokenizer: training BPE tokenizer...")
+    print(f"Downloading {len(all_tickers)} tickers from {DATA_START}...")
     t0 = time.time()
 
-    tokenizer = rustbpe.Tokenizer()
-    vocab_size_no_special = VOCAB_SIZE - len(SPECIAL_TOKENS)
-    tokenizer.train_from_iterator(text_iterator(), vocab_size_no_special, pattern=SPLIT_PATTERN)
-
-    # Build tiktoken encoding from trained merges
-    pattern = tokenizer.get_pattern()
-    mergeable_ranks = {bytes(k): v for k, v in tokenizer.get_mergeable_ranks()}
-    tokens_offset = len(mergeable_ranks)
-    special_tokens = {name: tokens_offset + i for i, name in enumerate(SPECIAL_TOKENS)}
-    enc = tiktoken.Encoding(
-        name="rustbpe",
-        pat_str=pattern,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=special_tokens,
+    raw = yf.download(
+        all_tickers, start=DATA_START,
+        end=datetime.now().strftime("%Y-%m-%d"),
+        auto_adjust=True, threads=True,
     )
+    if raw.empty:
+        print("ERROR: download failed."); sys.exit(1)
 
-    # Save tokenizer
-    with open(tokenizer_pkl, "wb") as f:
-        pickle.dump(enc, f)
+    frames = []
+    for ticker in all_tickers:
+        try:
+            df_t = (raw.xs(ticker, axis=1, level=1).copy()
+                    if isinstance(raw.columns, pd.MultiIndex) else raw.copy())
+            df_t["Ticker"] = ticker
+            df_t.index.name = "Date"
+            frames.append(df_t.reset_index())
+        except Exception as e:
+            print(f"  Warning: {ticker}: {e}")
 
-    t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
+    df = pd.concat(frames, ignore_index=True)
+    df.to_parquet(cache_path, index=False)
+    print(f"Data: {df['Ticker'].nunique()} tickers, {time.time()-t0:.1f}s, saved to {cache_path}")
+    return df
 
-    # --- Build token_bytes lookup for BPB evaluation ---
-    print("Tokenizer: building token_bytes lookup...")
-    special_set = set(SPECIAL_TOKENS)
-    token_bytes_list = []
-    for token_id in range(enc.n_vocab):
-        token_str = enc.decode([token_id])
-        if token_str in special_set:
-            token_bytes_list.append(0)
-        else:
-            token_bytes_list.append(len(token_str.encode("utf-8")))
-    token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
-    torch.save(token_bytes_tensor, token_bytes_path)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_path}")
 
-    # Sanity check
-    test = "Hello world! Numbers: 123. Unicode: 你好"
-    encoded = enc.encode_ordinary(test)
-    decoded = enc.decode(encoded)
-    assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
-    print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
+# ---------------------------------------------------------------------------
+# Processing: raw OHLCV → aligned tensors
+# ---------------------------------------------------------------------------
+
+def process_data(df_raw, tradeable=None):
+    """
+    Align raw OHLCV into tensors. Saves to PROCESSED_DIR.
+
+    Outputs (all torch tensors / pickle):
+        ohlcv.pt              — (D, N_all, 5) float32 [Open,High,Low,Close,Volume]
+        forward_returns.pt    — (D, N_tradeable) float32, simple close-to-close returns
+        tradeable_indices.pt  — LongTensor, tradeable ticker positions in ohlcv
+        macro_indices.pt      — LongTensor, macro ticker positions in ohlcv
+        train_end_idx.pt      — scalar int
+        test_start_idx.pt     — scalar int
+        dates.pkl             — list of datetime.date
+        all_tickers.pkl       — ordered list of all ticker names
+        tradeable_tickers.pkl — ordered list of tradeable ticker names
+    """
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    if os.path.exists(os.path.join(PROCESSED_DIR, "ohlcv.pt")):
+        print(f"Data: already processed at {PROCESSED_DIR}")
+        return
+
+    trade_list = tradeable or TRADEABLE_TICKERS
+    available = set(df_raw["Ticker"].unique())
+    trade_list = [t for t in trade_list if t in available]
+    macro_list = [t for t in MACRO_TICKERS if t in available]
+    all_list = trade_list + [t for t in macro_list if t not in trade_list]
+
+    print(f"Processing: {len(trade_list)} tradeable + {len(macro_list)} macro tickers")
+
+    # Build per-ticker DataFrames, find common dates
+    ticker_data = {}
+    common_dates = None
+    for ticker in all_list:
+        sub = df_raw[df_raw["Ticker"] == ticker].sort_values("Date").set_index("Date")
+        sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        if len(sub) < 100:
+            print(f"  Skipping {ticker}: only {len(sub)} rows"); continue
+        ticker_data[ticker] = sub
+        idx = sub.index
+        common_dates = idx if common_dates is None else common_dates.intersection(idx)
+
+    common_dates = common_dates.sort_values()
+    trade_list = [t for t in trade_list if t in ticker_data]
+    macro_list = [t for t in macro_list if t in ticker_data]
+    all_list = trade_list + [t for t in macro_list if t not in trade_list]
+
+    D, N = len(common_dates), len(all_list)
+    N_trade = len(trade_list)
+    print(f"  {D} trading days, {N} tickers ({N_trade} tradeable)")
+    print(f"  {common_dates[0].date()} → {common_dates[-1].date()}")
+
+    # Build OHLCV tensor
+    ohlcv = torch.zeros(D, N, 5, dtype=torch.float32)
+    for j, ticker in enumerate(all_list):
+        sub = ticker_data[ticker].loc[common_dates]
+        for k, col in enumerate(["Open", "High", "Low", "Close", "Volume"]):
+            ohlcv[:, j, k] = torch.from_numpy(sub[col].values.astype(np.float32))
+
+    # Forward simple returns for tradeable assets
+    tradeable_idx = torch.tensor([all_list.index(t) for t in trade_list], dtype=torch.long)
+    close_trade = ohlcv[:, tradeable_idx, C]
+    fwd = torch.zeros(D, N_trade)
+    fwd[:-1] = close_trade[1:] / close_trade[:-1].clamp(min=1e-8) - 1.0
+    fwd.clamp_(-0.5, 0.5)
+
+    macro_idx = torch.tensor([all_list.index(t) for t in macro_list], dtype=torch.long)
+
+    # Date split
+    dates_list = [d.date() if hasattr(d, 'date') else d for d in common_dates]
+    train_end_dt = pd.Timestamp(TRAIN_END).date()
+    test_start_dt = pd.Timestamp(TEST_START).date()
+    train_end_i = max(i for i, d in enumerate(dates_list) if d <= train_end_dt)
+    test_start_i = min(i for i, d in enumerate(dates_list) if d >= test_start_dt)
+    print(f"  Train: 0–{train_end_i}  |  Test: {test_start_i}–{D-2}")
+
+    # Save
+    torch.save(ohlcv, os.path.join(PROCESSED_DIR, "ohlcv.pt"))
+    torch.save(fwd, os.path.join(PROCESSED_DIR, "forward_returns.pt"))
+    torch.save(tradeable_idx, os.path.join(PROCESSED_DIR, "tradeable_indices.pt"))
+    torch.save(macro_idx, os.path.join(PROCESSED_DIR, "macro_indices.pt"))
+    torch.save(torch.tensor(train_end_i), os.path.join(PROCESSED_DIR, "train_end_idx.pt"))
+    torch.save(torch.tensor(test_start_i), os.path.join(PROCESSED_DIR, "test_start_idx.pt"))
+    with open(os.path.join(PROCESSED_DIR, "dates.pkl"), "wb") as f:
+        pickle.dump(dates_list, f)
+    with open(os.path.join(PROCESSED_DIR, "all_tickers.pkl"), "wb") as f:
+        pickle.dump(all_list, f)
+    with open(os.path.join(PROCESSED_DIR, "tradeable_tickers.pkl"), "wb") as f:
+        pickle.dump(trade_list, f)
+    print(f"Saved to {PROCESSED_DIR}")
+
 
 # ---------------------------------------------------------------------------
 # Runtime utilities (imported by train.py)
 # ---------------------------------------------------------------------------
 
-class Tokenizer:
-    """Minimal tokenizer wrapper. Training is handled above."""
-
-    def __init__(self, enc):
-        self.enc = enc
-        self.bos_token_id = enc.encode_single_token(BOS_TOKEN)
-
-    @classmethod
-    def from_directory(cls, tokenizer_dir=TOKENIZER_DIR):
-        with open(os.path.join(tokenizer_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
-        return cls(enc)
-
-    def get_vocab_size(self):
-        return self.enc.n_vocab
-
-    def get_bos_token_id(self):
-        return self.bos_token_id
-
-    def encode(self, text, prepend=None, num_threads=8):
-        if prepend is not None:
-            prepend_id = prepend if isinstance(prepend, int) else self.enc.encode_single_token(prepend)
-        if isinstance(text, str):
-            ids = self.enc.encode_ordinary(text)
-            if prepend is not None:
-                ids.insert(0, prepend_id)
-        elif isinstance(text, list):
-            ids = self.enc.encode_ordinary_batch(text, num_threads=num_threads)
-            if prepend is not None:
-                for row in ids:
-                    row.insert(0, prepend_id)
-        else:
-            raise ValueError(f"Invalid input type: {type(text)}")
-        return ids
-
-    def decode(self, ids):
-        return self.enc.decode(ids)
-
-
-def get_token_bytes(device="cpu"):
-    path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
-    with open(path, "rb") as f:
-        return torch.load(f, map_location=device)
-
-
-def _document_batches(split, tokenizer_batch_size=128):
-    """Infinite iterator over document batches from parquet files."""
-    parquet_paths = list_parquet_files()
-    assert len(parquet_paths) > 0, "No parquet files found. Run prepare.py first."
-    val_path = os.path.join(DATA_DIR, VAL_FILENAME)
-    if split == "train":
-        parquet_paths = [p for p in parquet_paths if p != val_path]
-        assert len(parquet_paths) > 0, "No training shards found."
-    else:
-        parquet_paths = [val_path]
-    epoch = 1
-    while True:
-        for filepath in parquet_paths:
-            pf = pq.ParquetFile(filepath)
-            for rg_idx in range(pf.num_row_groups):
-                rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
-                for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], epoch
-        epoch += 1
-
-
-def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
+def load_data(device="cpu"):
     """
-    BOS-aligned dataloader with best-fit packing.
-    Every row starts with BOS. Documents packed using best-fit to minimize cropping.
-    When no document fits remaining space, crops shortest doc to fill exactly.
-    100% utilization (no padding).
+    Load all processed data. Returns dict with:
+
+        ohlcv              — (D, N_all, 5) float tensor   [O, H, L, C, V]
+        forward_returns    — (D, N_tradeable) float tensor (simple returns)
+        all_tickers        — list[str], length N_all
+        tradeable_tickers  — list[str], length N_tradeable
+        tradeable_indices  — LongTensor, map tradeable → ohlcv ticker dim
+        macro_indices      — LongTensor, map macro → ohlcv ticker dim
+        dates              — list[datetime.date]
+        train_end_idx      — int
+        test_start_idx     — int
+        num_tradeable      — int
+        num_all            — int
+
+    train.py owns ALL feature engineering. This just gives you raw OHLCV.
     """
-    assert split in ["train", "val"]
-    row_capacity = T + 1
-    batches = _document_batches(split)
-    bos_token = tokenizer.get_bos_token_id()
-    doc_buffer = []
-    epoch = 1
+    P = PROCESSED_DIR
+    data = {}
+    data["ohlcv"] = torch.load(os.path.join(P, "ohlcv.pt"), map_location=device)
+    data["forward_returns"] = torch.load(os.path.join(P, "forward_returns.pt"), map_location=device)
+    data["tradeable_indices"] = torch.load(os.path.join(P, "tradeable_indices.pt"), map_location=device)
+    data["macro_indices"] = torch.load(os.path.join(P, "macro_indices.pt"), map_location=device)
+    data["train_end_idx"] = torch.load(os.path.join(P, "train_end_idx.pt")).item()
+    data["test_start_idx"] = torch.load(os.path.join(P, "test_start_idx.pt")).item()
+    with open(os.path.join(P, "dates.pkl"), "rb") as f:
+        data["dates"] = pickle.load(f)
+    with open(os.path.join(P, "all_tickers.pkl"), "rb") as f:
+        data["all_tickers"] = pickle.load(f)
+    with open(os.path.join(P, "tradeable_tickers.pkl"), "rb") as f:
+        data["tradeable_tickers"] = pickle.load(f)
+    data["num_tradeable"] = len(data["tradeable_tickers"])
+    data["num_all"] = len(data["all_tickers"])
+    return data
 
-    def refill_buffer():
-        nonlocal epoch
-        doc_batch, epoch = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
-        doc_buffer.extend(token_lists)
-
-    # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device="cuda")
-    cpu_inputs = cpu_buffer[:B * T].view(B, T)
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
-
-    while True:
-        for row_idx in range(B):
-            pos = 0
-            while pos < row_capacity:
-                while len(doc_buffer) < buffer_size:
-                    refill_buffer()
-
-                remaining = row_capacity - pos
-
-                # Find largest doc that fits entirely
-                best_idx = -1
-                best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = i
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    row_buffer[row_idx, pos:pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
-                    pos += len(doc)
-                else:
-                    # No doc fits — crop shortest to fill remaining
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
-                    pos += remaining
-
-        cpu_inputs.copy_(row_buffer[:, :-1])
-        cpu_targets.copy_(row_buffer[:, 1:])
-        gpu_buffer.copy_(cpu_buffer, non_blocking=True)
-        yield inputs, targets, epoch
 
 # ---------------------------------------------------------------------------
 # Evaluation (DO NOT CHANGE — this is the fixed metric)
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate_bpb(model, tokenizer, batch_size):
+def evaluate_sharpe(predict_fn, data, device="cuda"):
     """
-    Bits per byte (BPB): vocab size-independent evaluation metric.
-    Sums per-token cross-entropy (in nats), sums target byte lengths,
-    then converts nats/byte to bits/byte. Special tokens (byte length 0)
-    are excluded from both sums.
-    Uses fixed MAX_SEQ_LEN so results are comparable across configs.
+    Walk-forward backtest on the test period.
+
+    Interface contract for predict_fn:
+    ──────────────────────────────────
+        predict_fn(ohlcv_history, meta) -> position_scores
+
+        ohlcv_history : (T, N_all, 5) float tensor
+            Raw OHLCV for ALL tickers, sliced up to and including today.
+            Channels: [O=0, H=1, L=2, C=3, V=4].
+            No future data is ever included.
+
+        meta : dict
+            'all_tickers'        — list[str], all ticker names
+            'tradeable_tickers'  — list[str], tradeable ticker names
+            'tradeable_indices'  — LongTensor, positions in ohlcv ticker dim
+            'macro_indices'      — LongTensor, positions in ohlcv ticker dim
+            'today_idx'          — int, today's index in the full dataset
+
+        returns : (num_tradeable,) tensor of raw position scores.
+
+    Protocol:
+        For each test day t  (test_start_idx ≤ t < D-1):
+        1. predict_fn sees ohlcv[:t+1] — everything up to today's close.
+        2. Scores normalized: weights = scores × (TARGET_LEVERAGE / Σ|scores|).
+        3. Portfolio earns forward_returns[t]  (today close → tomorrow close).
+        4. Cost = TRANSACTION_COST_BPS/10000 × Σ|weight_change|.
+
+    Returns dict:
+        sharpe_ratio  — annualized Sharpe ratio (PRIMARY METRIC)
+        total_return  — cumulative simple return over test period
+        max_drawdown  — worst peak-to-trough decline
+        avg_turnover  — mean daily turnover
+        num_test_days — number of days in backtest
     """
-    token_bytes = get_token_bytes(device="cuda")
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
-    steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
-    total_nats = 0.0
-    total_bytes = 0
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction='none').view(-1)
-        y_flat = y.view(-1)
-        nbytes = token_bytes[y_flat]
-        mask = nbytes > 0
-        total_nats += (loss_flat * mask).sum().item()
-        total_bytes += nbytes.sum().item()
-    return total_nats / (math.log(2) * total_bytes)
+    ohlcv = data["ohlcv"].to(device)
+    fwd = data["forward_returns"].to(device)
+    test_start = data["test_start_idx"]
+    D = ohlcv.shape[0]
+
+    meta = {
+        "all_tickers": data["all_tickers"],
+        "tradeable_tickers": data["tradeable_tickers"],
+        "tradeable_indices": data["tradeable_indices"].to(device),
+        "macro_indices": data["macro_indices"].to(device),
+    }
+
+    daily_returns = []
+    daily_turnover = []
+    prev_weights = torch.zeros(data["num_tradeable"], device=device)
+
+    for t in range(test_start, D - 1):
+        meta["today_idx"] = t
+        history = ohlcv[:t + 1]
+
+        raw_scores = predict_fn(history, meta)
+        if not isinstance(raw_scores, torch.Tensor):
+            raw_scores = torch.tensor(raw_scores, dtype=torch.float32, device=device)
+        raw_scores = raw_scores.float().to(device)
+        assert raw_scores.shape == (data["num_tradeable"],), \
+            f"predict_fn must return ({data['num_tradeable']},), got {raw_scores.shape}"
+
+        abs_sum = raw_scores.abs().sum() + 1e-10
+        weights = raw_scores * (TARGET_LEVERAGE / abs_sum)
+
+        turnover = (weights - prev_weights).abs().sum().item()
+        tc = TRANSACTION_COST_BPS / 10000 * turnover
+        port_ret = (weights * fwd[t]).sum().item() - tc
+
+        daily_returns.append(port_ret)
+        daily_turnover.append(turnover)
+        prev_weights = weights.clone()
+
+    rets = np.array(daily_returns)
+    turns = np.array(daily_turnover)
+
+    if len(rets) < 2 or rets.std() < 1e-10:
+        sharpe = 0.0
+    else:
+        sharpe = (rets.mean() / rets.std()) * np.sqrt(252)
+
+    cumulative = np.cumprod(1 + rets)
+    total_return = cumulative[-1] - 1 if len(cumulative) > 0 else 0.0
+    peak = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - peak) / (peak + 1e-10)
+    max_dd = drawdown.min() if len(drawdown) > 0 else 0.0
+    avg_turn = turns.mean() if len(turns) > 0 else 0.0
+
+    return {
+        "sharpe_ratio": sharpe,
+        "total_return": total_return,
+        "max_drawdown": max_dd,
+        "avg_turnover": avg_turn,
+        "num_test_days": len(rets),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch")
-    parser.add_argument("--num-shards", type=int, default=10, help="Number of training shards to download (-1 = all). Val shard is always pinned.")
-    parser.add_argument("--download-workers", type=int, default=8, help="Number of parallel download workers")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tickers", nargs="+", default=None)
     args = parser.parse_args()
 
-    num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
-
-    print(f"Cache directory: {CACHE_DIR}")
+    print(f"Cache: {CACHE_DIR}\n")
+    df = download_data(args.tickers)
+    print()
+    process_data(df, args.tickers)
     print()
 
-    # Step 1: Download data
-    download_data(num_shards, download_workers=args.download_workers)
-    print()
-
-    # Step 2: Train tokenizer
-    train_tokenizer()
-    print()
-    print("Done! Ready to train.")
+    data = load_data()
+    print("Summary:")
+    print(f"  Tradeable : {data['num_tradeable']}  {data['tradeable_tickers'][:5]}...")
+    print(f"  Macro     : {len(data['macro_indices'])}  (VIX, TNX, GLD, ...)")
+    print(f"  Days      : {data['ohlcv'].shape[0]}  ({data['dates'][0]} → {data['dates'][-1]})")
+    print(f"  Train     : 0–{data['train_end_idx']}")
+    print(f"  Test      : {data['test_start_idx']}–{data['ohlcv'].shape[0]-2}")
+    print(f"\nDone! Ready to train.")
