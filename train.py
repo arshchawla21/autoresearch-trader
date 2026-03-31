@@ -1,8 +1,12 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-Experiment 15: Push reversal further, try QQQ beta, different skip periods.
-Best: rev5=-0.50 ram_bn42_21=0.25 ram_bn42_63=0.25, disp(0.2,4.0), EMA=0.04
+v16: Multi-factor residual momentum — neutralize individual stock returns
+against their sector ETF before computing momentum. This isolates
+idiosyncratic alpha from sector/market beta.
+
+Hypothesis: Sector-neutralized residual momentum captures purer stock-specific
+signals, reducing drawdowns from correlated sector moves.
 
 Usage: uv run train.py
 """
@@ -27,20 +31,46 @@ ohlcv = data["ohlcv"]
 tradeable_idx = data["tradeable_indices"]
 N_trade = data["num_tradeable"]
 D = ohlcv.shape[0]
+tickers = data["tradeable_tickers"]
 
 close = ohlcv[:, tradeable_idx, C]
 log_close = torch.log(close.clamp(min=1e-8))
 daily_ret = torch.zeros(D, N_trade)
 daily_ret[1:] = log_close[1:] - log_close[:-1]
 
-# SPY=0, QQQ=1
-spy_ret = daily_ret[:, 0]
-qqq_ret = daily_ret[:, 1]
+print(f"Tickers: {tickers}")
+
+# Map each tradeable asset to its sector ETF
+SECTOR_MAP = {
+    "SPY": "SPY", "QQQ": "SPY", "IWM": "SPY", "DIA": "SPY",
+    "XLF": "SPY", "XLE": "SPY", "XLK": "SPY", "XLV": "SPY",
+    "XLI": "SPY", "XLP": "SPY", "XLU": "SPY", "XLY": "SPY", "XLB": "SPY",
+    "AAPL": "XLK", "MSFT": "XLK", "GOOGL": "XLK", "NVDA": "XLK", "META": "XLK",
+    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY",
+    "JPM": "XLF", "V": "XLF", "MA": "XLF", "BAC": "XLF",
+    "JNJ": "XLV", "UNH": "XLV",
+    "PG": "XLP",
+}
+
+ticker_to_idx = {t: i for i, t in enumerate(tickers)}
 
 def cross_zscore(x):
     mu = x.mean(dim=1, keepdim=True)
     std = x.std(dim=1, keepdim=True).clamp(min=1e-8)
     return (x - mu) / std
+
+def compute_betas(daily_ret, ref_ret, lookback):
+    betas = torch.zeros(D, N_trade)
+    for t in range(lookback, D):
+        ref_w = ref_ret[t - lookback:t]
+        ref_dm = ref_w - ref_w.mean()
+        ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
+        for j in range(N_trade):
+            asset_w = daily_ret[t - lookback:t, j]
+            cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
+            betas[t, j] = cov / ref_var
+    betas[:lookback] = 1.0
+    return betas
 
 def risk_adj_momentum(ret_tensor, horizon, skip=5):
     sig = torch.zeros(D, N_trade)
@@ -56,48 +86,47 @@ def simple_momentum(log_close, horizon):
     sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
     return sig
 
-def compute_betas(daily_ret, ref_ret, lookback):
-    betas = torch.zeros(D, N_trade)
-    for t in range(lookback, D):
-        ref_w = ref_ret[t - lookback:t]
+print("Computing sector-neutral residuals...")
+
+# For each stock, compute beta to its sector ETF, then get residual returns
+sector_neutral_ret = daily_ret.clone()
+beta_lookback = 42
+
+for ticker in tickers:
+    j = ticker_to_idx[ticker]
+    sector = SECTOR_MAP.get(ticker, "SPY")
+    ref_idx = ticker_to_idx.get(sector, 0)
+    if ref_idx == j:
+        continue
+    ref_ret = daily_ret[:, ref_idx]
+    for t in range(beta_lookback, D):
+        ref_w = ref_ret[t - beta_lookback:t]
         ref_dm = ref_w - ref_w.mean()
         ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
-        for j in range(N_trade):
-            asset_w = daily_ret[t - lookback:t, j]
-            cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
-            betas[t, j] = cov / ref_var
-    betas[:lookback] = 1.0
-    return betas
+        asset_w = daily_ret[t - beta_lookback:t, j]
+        cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
+        beta = cov / ref_var
+        sector_neutral_ret[t, j] = daily_ret[t, j] - beta * ref_ret[t]
 
-print("Computing signals...")
+# Also compute 2-factor residuals (best from exp15)
+spy_ret = daily_ret[:, 0]
+qqq_ret = daily_ret[:, 1]
+betas_spy = compute_betas(daily_ret, spy_ret, 42)
+betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
+bn_2f = daily_ret - betas_spy * spy_ret.unsqueeze(1) - 0.3 * betas_qqq * qqq_ret.unsqueeze(1)
 
-# Beta-neutral with SPY (42-day)
-betas_spy42 = compute_betas(daily_ret, spy_ret, 42)
-bn_spy = daily_ret - betas_spy42 * spy_ret.unsqueeze(1)
+# Momentum signals on sector-neutral residuals
+ram_sn_21 = cross_zscore(risk_adj_momentum(sector_neutral_ret, 21, skip=5))
+ram_sn_63 = cross_zscore(risk_adj_momentum(sector_neutral_ret, 63, skip=5))
 
-# Beta-neutral with QQQ (42-day)
-betas_qqq42 = compute_betas(daily_ret, qqq_ret, 42)
-bn_qqq = daily_ret - betas_qqq42 * qqq_ret.unsqueeze(1)
-
-# Two-factor beta-neutral (SPY + QQQ)
-betas_spy42_2f = compute_betas(daily_ret, spy_ret, 42)
-betas_qqq42_2f = compute_betas(daily_ret, qqq_ret, 42)
-bn_2f = daily_ret - betas_spy42_2f * spy_ret.unsqueeze(1) - 0.3 * betas_qqq42_2f * qqq_ret.unsqueeze(1)
-
-# Momentum signals
-ram_spy_21 = cross_zscore(risk_adj_momentum(bn_spy, 21, skip=5))
-ram_spy_63 = cross_zscore(risk_adj_momentum(bn_spy, 63, skip=5))
-ram_qqq_21 = cross_zscore(risk_adj_momentum(bn_qqq, 21, skip=5))
-ram_qqq_63 = cross_zscore(risk_adj_momentum(bn_qqq, 63, skip=5))
+# Momentum signals on 2-factor residuals
 ram_2f_21 = cross_zscore(risk_adj_momentum(bn_2f, 21, skip=5))
 ram_2f_63 = cross_zscore(risk_adj_momentum(bn_2f, 63, skip=5))
 
-# Different reversal horizons
-z_rev3 = cross_zscore(simple_momentum(log_close, 3))
+# Reversal
 z_rev5 = cross_zscore(simple_momentum(log_close, 5))
-z_rev7 = cross_zscore(simple_momentum(log_close, 7))
 
-# Dispersion
+# Dispersion scaling
 cs_disp = daily_ret.std(dim=1)
 disp_ma42 = torch.zeros(D)
 for t in range(42, D):
@@ -110,39 +139,24 @@ best_sharpe = -999
 best_smooth = None
 best_name = ""
 
-configs = []
+configs = [
+    # Sector-neutral momentum
+    ("sn_base", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.035),
+    ("sn_rev45", (-0.45 * z_rev5 + 0.22 * ram_sn_21 + 0.33 * ram_sn_63) * dr, 0.035),
+    ("sn_rev55", (-0.55 * z_rev5 + 0.18 * ram_sn_21 + 0.27 * ram_sn_63) * dr, 0.035),
+    ("sn_e03", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.03),
+    ("sn_e04", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.04),
+    ("sn_e05", (-0.50 * z_rev5 + 0.20 * ram_sn_21 + 0.30 * ram_sn_63) * dr, 0.05),
+    ("sn_equal", (-0.50 * z_rev5 + 0.25 * ram_sn_21 + 0.25 * ram_sn_63) * dr, 0.035),
 
-# Push reversal weights further
-for w_rev in [-0.60, -0.55, -0.50, -0.45]:
-    w_mom = 1.0 + w_rev
-    for split in [0.5, 0.6, 0.4]:  # 21d share of momentum
-        w_21 = w_mom * split
-        w_63 = w_mom * (1 - split)
+    # Ensemble: sector-neutral + 2-factor
+    ("ens_50_50", (-0.50 * z_rev5 + 0.10 * ram_sn_21 + 0.15 * ram_sn_63 + 0.10 * ram_2f_21 + 0.15 * ram_2f_63) * dr, 0.035),
+    ("ens_30_70", (-0.50 * z_rev5 + 0.06 * ram_sn_21 + 0.09 * ram_sn_63 + 0.14 * ram_2f_21 + 0.21 * ram_2f_63) * dr, 0.035),
+    ("ens_70_30", (-0.50 * z_rev5 + 0.14 * ram_sn_21 + 0.21 * ram_sn_63 + 0.06 * ram_2f_21 + 0.09 * ram_2f_63) * dr, 0.035),
 
-        # SPY beta
-        sig = w_rev * z_rev5 + w_21 * ram_spy_21 + w_63 * ram_spy_63
-        for ema_a in [0.03, 0.035, 0.04, 0.045, 0.05]:
-            configs.append((f"spy_r{w_rev}_s{split}_e{ema_a}", sig * dr, ema_a))
-
-        # QQQ beta
-        sig_q = w_rev * z_rev5 + w_21 * ram_qqq_21 + w_63 * ram_qqq_63
-        for ema_a in [0.035, 0.04, 0.05]:
-            configs.append((f"qqq_r{w_rev}_s{split}_e{ema_a}", sig_q * dr, ema_a))
-
-        # 2-factor
-        sig_2f = w_rev * z_rev5 + w_21 * ram_2f_21 + w_63 * ram_2f_63
-        for ema_a in [0.035, 0.04, 0.05]:
-            configs.append((f"2f_r{w_rev}_s{split}_e{ema_a}", sig_2f * dr, ema_a))
-
-# Try rev3 and rev7
-for rev_sig, rn in [(z_rev3, "rev3"), (z_rev7, "rev7")]:
-    for w_rev in [-0.55, -0.50]:
-        w_mom = 1.0 + w_rev
-        sig = w_rev * rev_sig + w_mom * 0.5 * ram_spy_21 + w_mom * 0.5 * ram_spy_63
-        for ema_a in [0.035, 0.04, 0.05]:
-            configs.append((f"{rn}_r{w_rev}_e{ema_a}", sig * dr, ema_a))
-
-print(f"Total: {len(configs)} configs")
+    # Exp15 reference (2-factor only)
+    ("2f_ref", (-0.50 * z_rev5 + 0.20 * ram_2f_21 + 0.30 * ram_2f_63) * dr, 0.035),
+]
 
 for name, raw_sig, ema_a in configs:
     smooth = torch.zeros(D, N_trade)
@@ -156,13 +170,13 @@ for name, raw_sig, ema_a in configs:
 
     res = evaluate_sharpe(_pred, data, device=device)
     sh = res["sharpe_ratio"]
+    print(f"  {name:20s}: Sharpe={sh:+.4f}  Return={res['total_return']:+.4f}  "
+          f"MaxDD={res['max_drawdown']:+.4f}  Turn={res['avg_turnover']:.4f}")
 
     if sh > best_sharpe:
         best_sharpe = sh
         best_smooth = smooth_gpu
         best_name = name
-        print(f"  NEW BEST: {name}: Sharpe={sh:.4f}  Return={res['total_return']:.4f}  "
-              f"MaxDD={res['max_drawdown']:.4f}  Turn={res['avg_turnover']:.4f}")
 
 print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
 
