@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v26: Extended factor sweep + XLE as 6th factor.
+v27: Very high DIA/XLF weights, lower QQQ/IWM.
 
-Result: QQQ=0.6, IWM=0.8, DIA=1.4, XLF=0.35, XLE=0.0 gives Sharpe=3.88.
-DIA hit boundary again at 1.4. XLE adds nothing.
+Result: QQQ=0.5, IWM=0.6, DIA=1.8, XLF=0.5 gives Sharpe=3.92.
+DIA dominance continues — over-hedging DIA exposure is the key lever.
 
 Usage: uv run train.py
 """
@@ -80,8 +80,8 @@ betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
 betas_dia = compute_betas(daily_ret, dia_ret, 42)
 betas_xlf = compute_betas(daily_ret, xlf_ret, 42)
 
-# Best factor weights from v26 sweep
-W_QQQ, W_IWM, W_DIA, W_XLF = 0.6, 0.8, 1.4, 0.35
+# Best from v27 sweep
+W_QQQ, W_IWM, W_DIA, W_XLF = 0.5, 0.6, 1.8, 0.5
 
 bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
                - W_QQQ * betas_qqq * qqq_ret.unsqueeze(1) \
