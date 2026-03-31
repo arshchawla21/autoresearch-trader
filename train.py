@@ -1,11 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v23: Fine-tune 4-factor weights + signal weights jointly around v22 best.
+v24: Push factor weights higher + try 5-6 factor models with sector ETFs.
 
-Hypothesis: Joint optimization of factor model and signal weights around
-v22's best (SPY+0.4QQQ+0.2IWM+0.2DIA) will find a better configuration.
-Also try wider ranges for QQQ/DIA and different EMA speeds.
+Hypothesis: Factor weights are trending up (QQQ=0.6, IWM/DIA=0.3). More
+aggressive neutralization or adding sector ETFs as factors may improve
+residual quality further.
 
 Usage: uv run train.py
 """
@@ -30,16 +30,21 @@ ohlcv = data["ohlcv"]
 tradeable_idx = data["tradeable_indices"]
 N_trade = data["num_tradeable"]
 D = ohlcv.shape[0]
+tickers = data["tradeable_tickers"]
 
 close = ohlcv[:, tradeable_idx, C]
 log_close = torch.log(close.clamp(min=1e-8))
 daily_ret = torch.zeros(D, N_trade)
 daily_ret[1:] = log_close[1:] - log_close[:-1]
 
+# Factor returns: SPY=0, QQQ=1, IWM=2, DIA=3, XLF=4, XLE=5, XLK=6
 spy_ret = daily_ret[:, 0]
 qqq_ret = daily_ret[:, 1]
 iwm_ret = daily_ret[:, 2]
 dia_ret = daily_ret[:, 3]
+xlf_ret = daily_ret[:, 4]
+xle_ret = daily_ret[:, 5]
+xlk_ret = daily_ret[:, 6]
 
 def cross_zscore(x):
     mu = x.mean(dim=1, keepdim=True)
@@ -73,11 +78,14 @@ def simple_momentum(log_close, horizon):
     sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
     return sig
 
-print("Computing betas...")
+print("Computing betas (7 factors)...")
 betas_spy = compute_betas(daily_ret, spy_ret, 42)
 betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
 betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
 betas_dia = compute_betas(daily_ret, dia_ret, 42)
+betas_xlf = compute_betas(daily_ret, xlf_ret, 42)
+betas_xle = compute_betas(daily_ret, xle_ret, 42)
+betas_xlk = compute_betas(daily_ret, xlk_ret, 42)
 
 z_rev5 = cross_zscore(simple_momentum(log_close, 5))
 
@@ -105,87 +113,75 @@ for t in range(5, D):
     sig_ur[t] = underreaction[t-5:t].sum(dim=0)
 sig_ur = cross_zscore(sig_ur)
 
-print("Phase 1: Fine-tune factor weights...")
+# Best signal weights from v23
+W_REV, W_21, W_63, W_A, W_U, EMA = -0.40, 0.20, 0.30, -0.12, 0.15, 0.035
+
+def eval_factor_config(factor_residual):
+    ram_21 = cross_zscore(risk_adj_momentum(factor_residual, 21, skip=5))
+    ram_63 = cross_zscore(risk_adj_momentum(factor_residual, 63, skip=5))
+    sig = (W_REV * z_rev5 + W_21 * ram_21 + W_63 * ram_63
+           + W_A * sig_accel + W_U * sig_ur) * dr
+    smooth = torch.zeros(D, N_trade)
+    smooth[0] = sig[0]
+    for t in range(1, D):
+        smooth[t] = EMA * sig[t] + (1 - EMA) * smooth[t - 1]
+    smooth_gpu = smooth.to(device)
+    def _pred(oh, meta, _s=smooth_gpu):
+        return _s[meta["today_idx"]]
+    return evaluate_sharpe(_pred, data, device=device), smooth_gpu
+
+print("Phase 1: Push 4-factor weights higher...")
 best_sharpe = -999
 best_smooth = None
 best_name = ""
-best_factor_cfg = None
 
-# Fine grid around v22 best: QQQ=0.4, IWM=0.2, DIA=0.2
-for w_qqq in [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]:
-    for w_iwm in [0.15, 0.20, 0.25, 0.30]:
-        for w_dia in [0.15, 0.20, 0.25, 0.30]:
+# Extended ranges
+for w_qqq in [0.5, 0.6, 0.7, 0.8, 0.9]:
+    for w_iwm in [0.2, 0.3, 0.4, 0.5]:
+        for w_dia in [0.2, 0.3, 0.4, 0.5]:
             bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
                            - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
                            - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
                            - w_dia * betas_dia * dia_ret.unsqueeze(1)
 
-            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
-            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
-
-            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
-                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
-
-            smooth = torch.zeros(D, N_trade)
-            smooth[0] = sig[0]
-            for t in range(1, D):
-                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
-
-            smooth_gpu = smooth.to(device)
-            def _pred(oh, meta, _s=smooth_gpu):
-                return _s[meta["today_idx"]]
-
-            res = evaluate_sharpe(_pred, data, device=device)
+            res, sm = eval_factor_config(bn)
             sh = res["sharpe_ratio"]
 
             if sh > best_sharpe:
                 best_sharpe = sh
-                best_smooth = smooth_gpu
-                best_factor_cfg = (w_qqq, w_iwm, w_dia)
-                best_name = f"qqq{w_qqq}_iwm{w_iwm}_dia{w_dia}"
+                best_smooth = sm
+                best_name = f"4f_q{w_qqq}_i{w_iwm}_d{w_dia}"
                 print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
                       f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
                       f"Turn={res['avg_turnover']:.4f}")
 
-print(f"\nPhase 1 best: {best_name} Sharpe={best_sharpe:.4f}")
+print(f"\n4-factor best: {best_name} Sharpe={best_sharpe:.4f}")
 
-# Phase 2: sweep signal weights with best factor config
-print("\nPhase 2: Sweep signal weights...")
-w_qqq, w_iwm, w_dia = best_factor_cfg
+# Phase 2: Try 5-6 factor models
+print("\nPhase 2: Multi-factor models with sector ETFs...")
+for w_qqq in [0.5, 0.6, 0.7]:
+    for w_iwm in [0.3, 0.4]:
+        for w_dia in [0.3, 0.4]:
+            for xle_w in [0.0, 0.1, 0.15]:
+                for xlf_w in [0.0, 0.1, 0.15]:
+                    for xlk_w in [0.0, 0.1, 0.15]:
+                        if xle_w == 0 and xlf_w == 0 and xlk_w == 0:
+                            continue
+                        bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
+                                       - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
+                                       - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
+                                       - w_dia * betas_dia * dia_ret.unsqueeze(1) \
+                                       - xle_w * betas_xle * xle_ret.unsqueeze(1) \
+                                       - xlf_w * betas_xlf * xlf_ret.unsqueeze(1) \
+                                       - xlk_w * betas_xlk * xlk_ret.unsqueeze(1)
 
-bn_best = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
-                     - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
-                     - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
-                     - w_dia * betas_dia * dia_ret.unsqueeze(1)
-
-ram_21_b = cross_zscore(risk_adj_momentum(bn_best, 21, skip=5))
-ram_63_b = cross_zscore(risk_adj_momentum(bn_best, 63, skip=5))
-
-for w_rev in [-0.55, -0.50, -0.45, -0.40]:
-    for w_21 in [0.15, 0.20, 0.25]:
-        for w_63 in [0.25, 0.30, 0.35]:
-            for w_a in [-0.12, -0.10, -0.08]:
-                for w_u in [0.10, 0.12, 0.15]:
-                    for ema in [0.030, 0.035, 0.040]:
-                        sig = (w_rev * z_rev5 + w_21 * ram_21_b + w_63 * ram_63_b
-                               + w_a * sig_accel + w_u * sig_ur) * dr
-
-                        smooth = torch.zeros(D, N_trade)
-                        smooth[0] = sig[0]
-                        for t in range(1, D):
-                            smooth[t] = ema * sig[t] + (1 - ema) * smooth[t - 1]
-
-                        smooth_gpu = smooth.to(device)
-                        def _pred2(oh, meta, _s=smooth_gpu):
-                            return _s[meta["today_idx"]]
-
-                        res = evaluate_sharpe(_pred2, data, device=device)
+                        res, sm = eval_factor_config(bn)
                         sh = res["sharpe_ratio"]
 
                         if sh > best_sharpe:
                             best_sharpe = sh
-                            best_smooth = smooth_gpu
-                            best_name = f"sig_r{w_rev}_21{w_21}_63{w_63}_a{w_a}_u{w_u}_e{ema}"
+                            best_smooth = sm
+                            best_name = f"mf_q{w_qqq}_i{w_iwm}_d{w_dia}_xle{xle_w}_xlf{xlf_w}_xlk{xlk_w}"
                             print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
                                   f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
                                   f"Turn={res['avg_turnover']:.4f}")
