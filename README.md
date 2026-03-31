@@ -4,3 +4,12 @@ The idea: give an AI agent a small but real stock trading setup. It modifies the
 
 ![image](progress.png)
 
+## Mar31 v22 - Backtest
+![image](backtest_AAPL.png)
+![image](backtest_AMZN.png)
+![image](backtest_MSFT.png)
+![image](backtest_NVDA.png)
+![image](backtest_TSLA.png)
+
+Sharpe: 3.2950
+Return: 14.93%
