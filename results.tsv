@@ -20,3 +20,4 @@ v17_accel_leadlag	2.9715	0.1297	-0.0186	0.0842	0.0	1.5	1.3	0	2f base + neg accel
 v18_3factor	3.0807	0.1341	-0.0170	0.0867	0.0	4.8	1.3	0	3-factor (SPY+QQQ+IWM), accel10=-0.10, ur5=0.12, EMA=0.035
 v19_vol_range	3.0966	0.1348	-0.0170	0.0870	0.0	2.1	1.3	0	v18 + intraday range (+0.05); vol-price divergence hurt — marginal gain
 v20_nn_combiner	3.1194	0.1361	-0.0170	0.0864	300.0	305.0	2.0	266	70/30 NN+rule ensemble; NN alone 0.12 (overfit), ensemble marginal gain
+v21_turnovercap	3.1144	0.1374	-0.0178	0.1007	0.0	2.4	1.3	0	Hybrid EMA(0.05)+cap(0.007); per-asset/total caps worse than pure EMA
