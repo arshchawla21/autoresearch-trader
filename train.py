@@ -1,10 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v18: 3-factor beta-neutral (SPY+QQQ+IWM) + sweep underreaction/acceleration params.
+v19: Add volume-price divergence + intraday range signals to 3-factor base.
 
-Hypothesis: Adding IWM as a 3rd factor captures size exposure, and sweeping
-underreaction window lengths + acceleration lookbacks finds optimal params.
+Hypothesis: Volume-price divergence (price up on low volume = weak, expect
+reversal) and intraday range (high range = breakout, low range = mean revert)
+are orthogonal alpha sources to momentum/reversal/underreaction.
 
 Usage: uv run train.py
 """
@@ -16,7 +17,7 @@ import time
 import torch
 
 from prepare import (
-    C,
+    C, H, L, V,
     load_data, evaluate_sharpe,
 )
 
@@ -31,13 +32,16 @@ N_trade = data["num_tradeable"]
 D = ohlcv.shape[0]
 
 close = ohlcv[:, tradeable_idx, C]
+high = ohlcv[:, tradeable_idx, H]
+low = ohlcv[:, tradeable_idx, L]
+volume = ohlcv[:, tradeable_idx, V]
 log_close = torch.log(close.clamp(min=1e-8))
 daily_ret = torch.zeros(D, N_trade)
 daily_ret[1:] = log_close[1:] - log_close[:-1]
 
-spy_ret = daily_ret[:, 0]  # SPY
-qqq_ret = daily_ret[:, 1]  # QQQ
-iwm_ret = daily_ret[:, 2]  # IWM
+spy_ret = daily_ret[:, 0]
+qqq_ret = daily_ret[:, 1]
+iwm_ret = daily_ret[:, 2]
 
 def cross_zscore(x):
     mu = x.mean(dim=1, keepdim=True)
@@ -73,47 +77,68 @@ def simple_momentum(log_close, horizon):
 
 print("Computing signals...")
 
-# Betas
+# 3-factor beta-neutral (v18 best)
 betas_spy = compute_betas(daily_ret, spy_ret, 42)
 betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
 betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
-
-# 2-factor residual (v17 best)
-bn_2f = daily_ret - betas_spy * spy_ret.unsqueeze(1) - 0.3 * betas_qqq * qqq_ret.unsqueeze(1)
-
-# 3-factor residual
 bn_3f = daily_ret - betas_spy * spy_ret.unsqueeze(1) - 0.3 * betas_qqq * qqq_ret.unsqueeze(1) - 0.15 * betas_iwm * iwm_ret.unsqueeze(1)
 
-# Momentum on both
-ram_2f_21 = cross_zscore(risk_adj_momentum(bn_2f, 21, skip=5))
-ram_2f_63 = cross_zscore(risk_adj_momentum(bn_2f, 63, skip=5))
 ram_3f_21 = cross_zscore(risk_adj_momentum(bn_3f, 21, skip=5))
 ram_3f_63 = cross_zscore(risk_adj_momentum(bn_3f, 63, skip=5))
-
 z_rev5 = cross_zscore(simple_momentum(log_close, 5))
 
-# Acceleration at different lookbacks
+# Acceleration (v18 best: lag=10)
 mom_21_raw = torch.zeros(D, N_trade)
 for t in range(21, D):
     mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
+accel = torch.zeros(D, N_trade)
+for t in range(31, D):
+    accel[t] = mom_21_raw[t] - mom_21_raw[t - 10]
+z_accel = cross_zscore(accel)
 
-accels = {}
-for lag in [5, 7, 10, 14]:
-    a = torch.zeros(D, N_trade)
-    for t in range(21 + lag, D):
-        a[t] = mom_21_raw[t] - mom_21_raw[t - lag]
-    accels[lag] = cross_zscore(a)
-
-# Underreaction at different windows
+# Underreaction (v18 best: window=5)
 expected_ret = betas_spy * spy_ret.unsqueeze(1)
 underreaction = expected_ret - daily_ret
+ur_5d = torch.zeros(D, N_trade)
+for t in range(5, D):
+    ur_5d[t] = underreaction[t-5:t].sum(dim=0)
+z_ur = cross_zscore(ur_5d)
 
-urs = {}
-for win in [1, 2, 3, 5, 7]:
-    ur = torch.zeros(D, N_trade)
-    for t in range(win, D):
-        ur[t] = underreaction[t-win:t].sum(dim=0)
-    urs[win] = cross_zscore(ur)
+# NEW: Volume-price divergence
+# Idea: price up + volume down (or vice versa) = weak signal, expect reversal
+# Compute rolling correlation between returns and volume changes over 10 days
+log_vol = torch.log(volume.clamp(min=1))
+vol_ret = torch.zeros(D, N_trade)
+vol_ret[1:] = log_vol[1:] - log_vol[:-1]
+
+# Volume-price divergence: sign(return) * volume_change
+# If positive return on declining volume -> negative divergence (bearish)
+vpd = torch.zeros(D, N_trade)
+for t in range(10, D):
+    ret_w = daily_ret[t-10:t]
+    vr_w = vol_ret[t-10:t]
+    # Simple: correlation proxy = sum(ret * vol_change) / 10
+    vpd[t] = (ret_w * vr_w).sum(dim=0) / 10
+z_vpd = cross_zscore(vpd)
+
+# NEW: Intraday range signal
+# High range relative to recent average = breakout potential
+intraday_range = (high - low) / close.clamp(min=1e-8)
+range_ma20 = torch.zeros_like(intraday_range)
+for t in range(20, D):
+    range_ma20[t] = intraday_range[t-20:t].mean(dim=0)
+range_ma20[:20] = intraday_range[:20].mean(dim=0)
+# Range ratio: above average = volatile/breakout day
+range_ratio = intraday_range / range_ma20.clamp(min=1e-8)
+z_range = cross_zscore(range_ratio)
+
+# Range * return sign: high range + positive return = strong bullish breakout
+range_direction = z_range * daily_ret.sign()
+# Smooth over 5 days
+rd_5d = torch.zeros(D, N_trade)
+for t in range(5, D):
+    rd_5d[t] = range_direction[t-5:t].sum(dim=0)
+z_rd = cross_zscore(rd_5d)
 
 # Dispersion scaling
 cs_disp = daily_ret.std(dim=1)
@@ -123,35 +148,42 @@ for t in range(42, D):
 disp_ma42[:42] = cs_disp[:42].mean()
 dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
-print("Sweeping configurations...")
+# v18 best base signal
+base = (-0.50 * z_rev5 + 0.20 * ram_3f_21 + 0.30 * ram_3f_63
+        - 0.10 * z_accel + 0.12 * z_ur)
+
+print("Testing configurations...")
 best_sharpe = -999
 best_smooth = None
 best_name = ""
 
-# Build configs
-configs = []
+configs = [
+    # v18 reference
+    ("v18_ref", base * dr, 0.035),
 
-# v17 reference
-base_2f = -0.50 * z_rev5 + 0.20 * ram_2f_21 + 0.30 * ram_2f_63
-configs.append(("v17_ref", (base_2f - 0.05 * accels[10] + 0.10 * urs[3]) * dr, 0.035))
+    # Add volume-price divergence (positive = momentum confirmed by volume)
+    ("vpd_05", (base + 0.05 * z_vpd) * dr, 0.035),
+    ("vpd_08", (base + 0.08 * z_vpd) * dr, 0.035),
+    ("vpd_10", (base + 0.10 * z_vpd) * dr, 0.035),
+    ("vpd_n05", (base - 0.05 * z_vpd) * dr, 0.035),
 
-# 3-factor base
-base_3f = -0.50 * z_rev5 + 0.20 * ram_3f_21 + 0.30 * ram_3f_63
-for accel_lag in [5, 10]:
-    for ur_win in [3, 5]:
-        for w_a, w_u in [(-0.05, 0.10), (-0.05, 0.15), (-0.08, 0.10), (-0.10, 0.12)]:
-            sig = (base_3f + w_a * accels[accel_lag] + w_u * urs[ur_win]) * dr
-            for ema in [0.03, 0.035, 0.04]:
-                configs.append((f"3f_a{accel_lag}w{w_a}_u{ur_win}w{w_u}_e{ema}", sig, ema))
+    # Add range-direction signal
+    ("rd_05", (base + 0.05 * z_rd) * dr, 0.035),
+    ("rd_08", (base + 0.08 * z_rd) * dr, 0.035),
+    ("rd_10", (base + 0.10 * z_rd) * dr, 0.035),
+    ("rd_n05", (base - 0.05 * z_rd) * dr, 0.035),
+    ("rd_n08", (base - 0.08 * z_rd) * dr, 0.035),
 
-# 2-factor with different ur/accel params
-for accel_lag in [5, 7, 10, 14]:
-    for ur_win in [1, 2, 3, 5, 7]:
-        for w_a, w_u in [(-0.05, 0.10), (-0.05, 0.15), (-0.08, 0.12), (-0.03, 0.08)]:
-            sig = (base_2f + w_a * accels[accel_lag] + w_u * urs[ur_win]) * dr
-            configs.append((f"2f_a{accel_lag}w{w_a}_u{ur_win}w{w_u}", sig, 0.035))
+    # Both
+    ("both_vpd5_rd5", (base + 0.05 * z_vpd + 0.05 * z_rd) * dr, 0.035),
+    ("both_vpd5_rdn5", (base + 0.05 * z_vpd - 0.05 * z_rd) * dr, 0.035),
+    ("both_vpdn5_rd5", (base - 0.05 * z_vpd + 0.05 * z_rd) * dr, 0.035),
+    ("both_vpd8_rd8", (base + 0.08 * z_vpd + 0.08 * z_rd) * dr, 0.035),
 
-print(f"Total: {len(configs)} configs")
+    # Plain range (high range = high vol = uncertain)
+    ("range_n05", (base - 0.05 * z_range) * dr, 0.035),
+    ("range_05", (base + 0.05 * z_range) * dr, 0.035),
+]
 
 for name, raw_sig, ema_a in configs:
     smooth = torch.zeros(D, N_trade)
@@ -165,13 +197,13 @@ for name, raw_sig, ema_a in configs:
 
     res = evaluate_sharpe(_pred, data, device=device)
     sh = res["sharpe_ratio"]
+    print(f"  {name:20s}: Sharpe={sh:+.4f}  Return={res['total_return']:+.4f}  "
+          f"MaxDD={res['max_drawdown']:+.4f}  Turn={res['avg_turnover']:.4f}")
 
     if sh > best_sharpe:
         best_sharpe = sh
         best_smooth = smooth_gpu
         best_name = name
-        print(f"  NEW BEST: {name}: Sharpe={sh:.4f}  Return={res['total_return']:.4f}  "
-              f"MaxDD={res['max_drawdown']:.4f}  Turn={res['avg_turnover']:.4f}")
 
 print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
 
