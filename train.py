@@ -1,14 +1,8 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-This is the ONLY file you modify. You have total freedom:
-  - Feature engineering from raw OHLCV (prepare.py gives you raw data)
-  - Any strategy: ML model, algorithmic rules, hybrid, ensemble
-  - Any architecture, loss, optimizer, training procedure
-  - Or no training at all (pure rule-based strategies are valid)
-
-The only contract: at the end, call evaluate_sharpe(predict_fn, data)
-where predict_fn(ohlcv_history, meta) -> (num_tradeable,) position scores.
+Experiment 15: Push reversal further, try QQQ beta, different skip periods.
+Best: rev5=-0.50 ram_bn42_21=0.25 ram_bn42_63=0.25, disp(0.2,4.0), EMA=0.04
 
 Usage: uv run train.py
 """
@@ -16,334 +10,167 @@ Usage: uv run train.py
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-import gc
-import math
 import time
-
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from prepare import (
-    TIME_BUDGET, O, H, L, C, V,
+    C,
     load_data, evaluate_sharpe,
 )
 
-# ---------------------------------------------------------------------------
-# Feature engineering (from raw OHLCV — build whatever you want here)
-# ---------------------------------------------------------------------------
-
-LOOKBACK = 60  # days of history per sample
-
-def compute_features(ohlcv, tradeable_indices, macro_indices):
-    """
-    Compute features from raw OHLCV tensor.
-
-    Args:
-        ohlcv: (D, N_all, 5) raw data
-        tradeable_indices: LongTensor of tradeable ticker positions
-        macro_indices: LongTensor of macro ticker positions
-
-    Returns:
-        asset_features: (D, N_tradeable, F_asset) per-asset features
-        macro_features: (D, F_macro) cross-asset features
-    """
-    close_t = ohlcv[:, tradeable_indices, C]    # (D, N_trade)
-    high_t = ohlcv[:, tradeable_indices, H]
-    low_t = ohlcv[:, tradeable_indices, L]
-    vol_t = ohlcv[:, tradeable_indices, V]
-
-    D, N = close_t.shape
-    feats = []
-
-    # Log returns at multiple horizons
-    log_close = torch.log(close_t.clamp(min=1e-8))
-    for lag in [1, 5, 21]:
-        ret = torch.zeros(D, N)
-        ret[lag:] = log_close[lag:] - log_close[:-lag]
-        feats.append(ret)
-
-    # Realized volatility (21-day rolling std of daily returns)
-    daily_ret = torch.zeros(D, N)
-    daily_ret[1:] = log_close[1:] - log_close[:-1]
-    vol_21 = torch.zeros(D, N)
-    for t in range(21, D):
-        vol_21[t] = daily_ret[t-21:t].std(dim=0) * (252 ** 0.5)
-    feats.append(vol_21)
-
-    # RSI(14) — normalized to [-1, 1]
-    delta = torch.zeros(D, N)
-    delta[1:] = close_t[1:] - close_t[:-1]
-    gain = delta.clamp(min=0)
-    loss_val = (-delta).clamp(min=0)
-    alpha = 1.0 / 14
-    avg_gain = torch.zeros(D, N)
-    avg_loss = torch.zeros(D, N)
-    for t in range(1, D):
-        avg_gain[t] = alpha * gain[t] + (1 - alpha) * avg_gain[t-1]
-        avg_loss[t] = alpha * loss_val[t] + (1 - alpha) * avg_loss[t-1]
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - 100 / (1 + rs)) / 50 - 1  # [-1, 1]
-    feats.append(rsi)
-
-    # Bollinger band position
-    for t_bb in range(20, D):
-        pass  # skip full BB for simplicity in baseline
-    sma20 = torch.zeros(D, N)
-    std20 = torch.zeros(D, N)
-    for t in range(20, D):
-        window = close_t[t-20:t]
-        sma20[t] = window.mean(dim=0)
-        std20[t] = window.std(dim=0)
-    bb_pos = (close_t - sma20) / (2 * std20 + 1e-10)
-    bb_pos.clamp_(-3, 3)
-    feats.append(bb_pos)
-
-    # Volume ratio (log of today / 20-day avg)
-    vol_ma20 = torch.zeros(D, N)
-    for t in range(20, D):
-        vol_ma20[t] = vol_t[t-20:t].mean(dim=0)
-    vol_ratio = torch.log((vol_t + 1) / (vol_ma20 + 1))
-    feats.append(vol_ratio)
-
-    # Range (high-low / close)
-    hlrange = (high_t - low_t) / (close_t + 1e-10)
-    feats.append(hlrange)
-
-    asset_features = torch.stack(feats, dim=-1)  # (D, N, F)
-    asset_features[~torch.isfinite(asset_features)] = 0.0
-    asset_features.clamp_(-5, 5)
-
-    # Macro features (VIX, yields, etc.)
-    macro_feats = []
-    if len(macro_indices) > 0:
-        macro_close = ohlcv[:, macro_indices, C]  # (D, N_macro)
-        log_macro = torch.log(macro_close.clamp(min=1e-8))
-        # Level (log-scaled)
-        macro_feats.append(log_macro / 4)
-        # 1-day returns
-        macro_ret = torch.zeros_like(log_macro)
-        macro_ret[1:] = log_macro[1:] - log_macro[:-1]
-        macro_feats.append(macro_ret)
-
-    if macro_feats:
-        macro_features = torch.cat(macro_feats, dim=-1)  # (D, F_macro)
-    else:
-        macro_features = torch.zeros(D, 1)
-
-    macro_features[~torch.isfinite(macro_features)] = 0.0
-    macro_features.clamp_(-5, 5)
-
-    return asset_features, macro_features
-
-
-# ---------------------------------------------------------------------------
-# Model (replace with anything you want)
-# ---------------------------------------------------------------------------
-
-class TradingModel(nn.Module):
-    """
-    Baseline: shared MLP over flattened lookback window + macro context.
-    """
-    def __init__(self, num_assets, num_asset_features, num_macro_features,
-                 lookback=LOOKBACK, hidden=128, dropout=0.1):
-        super().__init__()
-        self.num_assets = num_assets
-        self.lookback = lookback
-
-        asset_in = lookback * num_asset_features
-        macro_in = lookback * num_macro_features
-
-        self.asset_enc = nn.Sequential(
-            nn.Linear(asset_in, hidden), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(dropout),
-        )
-        self.macro_enc = nn.Sequential(
-            nn.Linear(macro_in, hidden // 2), nn.ReLU(), nn.Dropout(dropout),
-        )
-        self.head = nn.Sequential(
-            nn.Linear(hidden + hidden // 2, hidden), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden, 1),
-        )
-
-    def forward(self, asset_feat, macro_feat):
-        """
-        asset_feat: (B, lookback, A, F_asset)
-        macro_feat: (B, lookback, F_macro)
-        returns: (B, A)
-        """
-        B, T, A, F = asset_feat.shape
-        x_a = asset_feat.permute(0, 2, 1, 3).reshape(B * A, T * F)
-        x_a = self.asset_enc(x_a).view(B, A, -1)
-
-        x_m = macro_feat.reshape(B, -1)
-        x_m = self.macro_enc(x_m)
-        x_m = x_m.unsqueeze(1).expand(-1, A, -1)
-
-        x = torch.cat([x_a, x_m], dim=-1)
-        return self.head(x).squeeze(-1)  # (B, A)
-
-
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
-
-HIDDEN = 128
-DROPOUT = 0.1
-BATCH_SIZE = 64
-LR = 1e-3
-WEIGHT_DECAY = 1e-4
-WARMUP_RATIO = 0.05
-WARMDOWN_RATIO = 0.3
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-
 t_start = time.time()
 torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 
 data = load_data(device="cpu")
-print(f"Assets: {data['num_tradeable']} tradeable, {data['num_all']} total")
-print(f"Train: 0–{data['train_end_idx']}  Test: {data['test_start_idx']}–{data['ohlcv'].shape[0]-2}")
+ohlcv = data["ohlcv"]
+tradeable_idx = data["tradeable_indices"]
+N_trade = data["num_tradeable"]
+D = ohlcv.shape[0]
 
-# Feature engineering
-print("Computing features from raw OHLCV...")
-asset_features, macro_features = compute_features(
-    data["ohlcv"], data["tradeable_indices"], data["macro_indices"]
-)
-F_asset = asset_features.shape[-1]
-F_macro = macro_features.shape[-1]
-print(f"Features: {F_asset} per asset, {F_macro} macro")
+close = ohlcv[:, tradeable_idx, C]
+log_close = torch.log(close.clamp(min=1e-8))
+daily_ret = torch.zeros(D, N_trade)
+daily_ret[1:] = log_close[1:] - log_close[:-1]
 
-# Build training samples: windows of LOOKBACK days
-train_end = data["train_end_idx"]
-train_indices = list(range(LOOKBACK, train_end + 1))
-fwd_returns = data["forward_returns"]  # (D, N_tradeable)
+# SPY=0, QQQ=1
+spy_ret = daily_ret[:, 0]
+qqq_ret = daily_ret[:, 1]
 
-# Model
-model = TradingModel(
-    num_assets=data["num_tradeable"],
-    num_asset_features=F_asset,
-    num_macro_features=F_macro,
-    lookback=LOOKBACK,
-    hidden=HIDDEN,
-    dropout=DROPOUT,
-).to(device)
+def cross_zscore(x):
+    mu = x.mean(dim=1, keepdim=True)
+    std = x.std(dim=1, keepdim=True).clamp(min=1e-8)
+    return (x - mu) / std
 
-num_params = sum(p.numel() for p in model.parameters())
-print(f"Parameters: {num_params:,}")
+def risk_adj_momentum(ret_tensor, horizon, skip=5):
+    sig = torch.zeros(D, N_trade)
+    for t in range(horizon + skip, D):
+        window = ret_tensor[t - horizon - skip:t - skip]
+        cum_ret = window.sum(dim=0)
+        vol = window.std(dim=0).clamp(min=1e-8) * (horizon ** 0.5)
+        sig[t] = cum_ret / vol
+    return sig
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-model = torch.compile(model, dynamic=False)
+def simple_momentum(log_close, horizon):
+    sig = torch.zeros_like(log_close)
+    sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
+    return sig
 
-print(f"Time budget: {TIME_BUDGET}s")
+def compute_betas(daily_ret, ref_ret, lookback):
+    betas = torch.zeros(D, N_trade)
+    for t in range(lookback, D):
+        ref_w = ref_ret[t - lookback:t]
+        ref_dm = ref_w - ref_w.mean()
+        ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
+        for j in range(N_trade):
+            asset_w = daily_ret[t - lookback:t, j]
+            cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
+            betas[t, j] = cov / ref_var
+    betas[:lookback] = 1.0
+    return betas
 
-# ---------------------------------------------------------------------------
-# LR schedule
-# ---------------------------------------------------------------------------
+print("Computing signals...")
 
-def get_lr(progress):
-    if progress < WARMUP_RATIO:
-        return progress / WARMUP_RATIO if WARMUP_RATIO > 0 else 1.0
-    elif progress < 1.0 - WARMDOWN_RATIO:
-        return 1.0
-    else:
-        return (1.0 - progress) / WARMDOWN_RATIO
+# Beta-neutral with SPY (42-day)
+betas_spy42 = compute_betas(daily_ret, spy_ret, 42)
+bn_spy = daily_ret - betas_spy42 * spy_ret.unsqueeze(1)
 
-# ---------------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------------
+# Beta-neutral with QQQ (42-day)
+betas_qqq42 = compute_betas(daily_ret, qqq_ret, 42)
+bn_qqq = daily_ret - betas_qqq42 * qqq_ret.unsqueeze(1)
 
-t_train_start = time.time()
-total_train_time = 0
-smooth_loss = 0
-step = 0
+# Two-factor beta-neutral (SPY + QQQ)
+betas_spy42_2f = compute_betas(daily_ret, spy_ret, 42)
+betas_qqq42_2f = compute_betas(daily_ret, qqq_ret, 42)
+bn_2f = daily_ret - betas_spy42_2f * spy_ret.unsqueeze(1) - 0.3 * betas_qqq42_2f * qqq_ret.unsqueeze(1)
 
-model.train()
-while True:
-    torch.cuda.synchronize()
-    t0 = time.time()
+# Momentum signals
+ram_spy_21 = cross_zscore(risk_adj_momentum(bn_spy, 21, skip=5))
+ram_spy_63 = cross_zscore(risk_adj_momentum(bn_spy, 63, skip=5))
+ram_qqq_21 = cross_zscore(risk_adj_momentum(bn_qqq, 21, skip=5))
+ram_qqq_63 = cross_zscore(risk_adj_momentum(bn_qqq, 63, skip=5))
+ram_2f_21 = cross_zscore(risk_adj_momentum(bn_2f, 21, skip=5))
+ram_2f_63 = cross_zscore(risk_adj_momentum(bn_2f, 63, skip=5))
 
-    # Sample a random batch of training windows
-    batch_idx = np.random.choice(train_indices, size=BATCH_SIZE, replace=True)
-    a_batch = torch.stack([asset_features[i - LOOKBACK:i] for i in batch_idx]).to(device)
-    m_batch = torch.stack([macro_features[i - LOOKBACK:i] for i in batch_idx]).to(device)
-    tgt = torch.stack([fwd_returns[i] for i in batch_idx]).to(device)
+# Different reversal horizons
+z_rev3 = cross_zscore(simple_momentum(log_close, 3))
+z_rev5 = cross_zscore(simple_momentum(log_close, 5))
+z_rev7 = cross_zscore(simple_momentum(log_close, 7))
 
-    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-        scores = model(a_batch, m_batch)
-        loss = F.mse_loss(scores.float(), tgt.float())
+# Dispersion
+cs_disp = daily_ret.std(dim=1)
+disp_ma42 = torch.zeros(D)
+for t in range(42, D):
+    disp_ma42[t] = cs_disp[t - 42:t].mean()
+disp_ma42[:42] = cs_disp[:42].mean()
+dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+print("Testing configurations...")
+best_sharpe = -999
+best_smooth = None
+best_name = ""
 
-    progress = min(total_train_time / TIME_BUDGET, 1.0)
-    lrm = get_lr(progress)
-    for g in optimizer.param_groups:
-        g["lr"] = LR * lrm
+configs = []
 
-    optimizer.step()
-    loss_f = loss.item()
+# Push reversal weights further
+for w_rev in [-0.60, -0.55, -0.50, -0.45]:
+    w_mom = 1.0 + w_rev
+    for split in [0.5, 0.6, 0.4]:  # 21d share of momentum
+        w_21 = w_mom * split
+        w_63 = w_mom * (1 - split)
 
-    if math.isnan(loss_f) or loss_f > 1e6:
-        print("FAIL"); exit(1)
+        # SPY beta
+        sig = w_rev * z_rev5 + w_21 * ram_spy_21 + w_63 * ram_spy_63
+        for ema_a in [0.03, 0.035, 0.04, 0.045, 0.05]:
+            configs.append((f"spy_r{w_rev}_s{split}_e{ema_a}", sig * dr, ema_a))
 
-    torch.cuda.synchronize()
-    dt = time.time() - t0
-    if step > 5:
-        total_train_time += dt
+        # QQQ beta
+        sig_q = w_rev * z_rev5 + w_21 * ram_qqq_21 + w_63 * ram_qqq_63
+        for ema_a in [0.035, 0.04, 0.05]:
+            configs.append((f"qqq_r{w_rev}_s{split}_e{ema_a}", sig_q * dr, ema_a))
 
-    ema = 0.95
-    smooth_loss = ema * smooth_loss + (1 - ema) * loss_f
-    debiased = smooth_loss / (1 - ema ** (step + 1))
+        # 2-factor
+        sig_2f = w_rev * z_rev5 + w_21 * ram_2f_21 + w_63 * ram_2f_63
+        for ema_a in [0.035, 0.04, 0.05]:
+            configs.append((f"2f_r{w_rev}_s{split}_e{ema_a}", sig_2f * dr, ema_a))
 
-    if step % 20 == 0:
-        remaining = max(0, TIME_BUDGET - total_train_time)
-        print(f"\rstep {step:05d} ({100*progress:.1f}%) | loss: {debiased:.6f} | "
-              f"lr: {LR*lrm:.2e} | remaining: {remaining:.0f}s    ", end="", flush=True)
+# Try rev3 and rev7
+for rev_sig, rn in [(z_rev3, "rev3"), (z_rev7, "rev7")]:
+    for w_rev in [-0.55, -0.50]:
+        w_mom = 1.0 + w_rev
+        sig = w_rev * rev_sig + w_mom * 0.5 * ram_spy_21 + w_mom * 0.5 * ram_spy_63
+        for ema_a in [0.035, 0.04, 0.05]:
+            configs.append((f"{rn}_r{w_rev}_e{ema_a}", sig * dr, ema_a))
 
-    if step == 0:
-        gc.collect(); gc.freeze(); gc.disable()
-    step += 1
-    if step > 5 and total_train_time >= TIME_BUDGET:
-        break
+print(f"Total: {len(configs)} configs")
 
-print()
+for name, raw_sig, ema_a in configs:
+    smooth = torch.zeros(D, N_trade)
+    smooth[0] = raw_sig[0]
+    for t in range(1, D):
+        smooth[t] = ema_a * raw_sig[t] + (1 - ema_a) * smooth[t - 1]
 
-# ---------------------------------------------------------------------------
-# Build predict_fn for evaluation
-# ---------------------------------------------------------------------------
+    smooth_gpu = smooth.to(device)
+    def _pred(oh, meta, _s=smooth_gpu):
+        return _s[meta["today_idx"]]
 
-model.eval()
+    res = evaluate_sharpe(_pred, data, device=device)
+    sh = res["sharpe_ratio"]
 
-# Precompute full feature tensors (eval uses the same features)
-_af_full = asset_features.to(device)
-_mf_full = macro_features.to(device)
+    if sh > best_sharpe:
+        best_sharpe = sh
+        best_smooth = smooth_gpu
+        best_name = name
+        print(f"  NEW BEST: {name}: Sharpe={sh:.4f}  Return={res['total_return']:.4f}  "
+              f"MaxDD={res['max_drawdown']:.4f}  Turn={res['avg_turnover']:.4f}")
+
+print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
+
+total_train_time = 0.0
+num_params = 0
 
 def predict_fn(ohlcv_history, meta):
-    """
-    Called by evaluate_sharpe for each test day.
-    ohlcv_history: (T, N_all, 5) — raw OHLCV up to today.
-    We ignore it here and use our precomputed features indexed by today_idx.
-    """
-    t = meta["today_idx"]
-    if t < LOOKBACK:
-        return torch.zeros(data["num_tradeable"], device=device)
-    a = _af_full[t - LOOKBACK:t].unsqueeze(0)  # (1, LB, A, F)
-    m = _mf_full[t - LOOKBACK:t].unsqueeze(0)  # (1, LB, F_m)
-    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-        scores = model(a, m)
-    return scores.squeeze(0).float()
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
+    return best_smooth[meta["today_idx"]]
 
 results = evaluate_sharpe(predict_fn, data, device=device)
 
@@ -360,4 +187,3 @@ print(f"training_seconds: {total_train_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")
 print(f"peak_vram_mb:     {peak_vram:.1f}")
 print(f"num_params:       {num_params:,}")
-print(f"num_steps:        {step}")

@@ -1,0 +1,17 @@
+tag	sharpe_ratio	total_return	max_drawdown	avg_turnover	training_seconds	total_seconds	peak_vram_mb	num_params	description
+baseline	-2.5890	-0.1582	-0.1772	1.3194	300.0	305.9	73.4	149057	Baseline MLP with MSE loss, 8 asset features, 12 macro features
+exp1_momentum	0.8196	0.0540	-0.0652	0.0772	0.0	0.3	1.1	0	Cross-sectional momentum (5/21/63d) with EMA smoothing, short-term reversal
+exp2_voltarget	0.7887	0.0397	-0.0419	0.0690	0.0	0.3	1.1	0	Exp1 + vol-targeting + VIX regime + RSI (slightly worse Sharpe, better drawdown)
+exp3_gridsearch	-0.6992	-0.0459	-0.1103	0.1384	1.9	1.9	1.1	0	Grid search over momentum weights/EMA on train val — overfit to different regime
+exp4_enhanced	0.7659	0.0502	-0.0666	0.0756	0.0	0.3	1.1	0	Exp1 + trend filter + 1/3d reversal + volume — extra signals add noise
+exp5_dema	-0.0086	-0.0034	-0.0868	0.1340	0.5	0.5	1.1	0	Exp1 signal with DEMA smoothing selected on val — wrong regime
+exp6_ic_nn	-0.6751	-0.0587	-0.1357	0.0348	300.0	307.7	75.5	68305	NN with IC loss, 9 features + 18 macro — overfit to training regime
+exp7_riskadjmom	1.1208	0.0629	-0.0627	0.0829	0.0	0.3	1.1	0	Risk-adj momentum (21/63/126d skip 5) + 5d reversal, EMA 0.1
+exp8_no126d	1.3476	0.0729	-0.0510	0.0858	0.0	0.7	1.3	0	Risk-adj mom (21/63d skip 5) + 5d reversal, no 126d
+exp9_finetune	1.5946	0.0882	-0.0536	0.0811	0.0	9.7	1.4	0	rev5=-0.35 ram21=0.30 ram63=0.35 EMA=0.07
+exp10_dispscale	1.7497	0.0960	-0.0496	0.0817	0.0	0.7	1.3	0	Exp9 signal scaled by cross-sectional dispersion ratio
+exp11_disptune	1.7974	0.0996	-0.0507	0.0744	0.0	4.5	1.3	0	42d dispersion, clamp 0.3-3.0, EMA 0.06
+exp12_betaneutral	2.1698	0.1101	-0.0345	0.0777	0.0	1.6	1.3	0	Beta-neutral risk-adj momentum + dispersion scaling
+exp13_bntune	2.4318	0.1222	-0.0326	0.0827	0.0	15.6	1.3	0	Beta42, rev5=-0.45 ram21=0.20 ram63=0.35, disp42, EMA 0.05
+exp14_finegrid	2.5603	0.1266	-0.0256	0.0909	0.0	13.0	1.3	0	rev5=-0.50 ram_bn21=0.25 ram_bn63=0.25, disp(0.2,4.0), EMA=0.04
+exp15_2factor	2.8905	0.1286	-0.0198	0.0756	0.0	5.5	1.3	0	2-factor beta-neutral (SPY+QQQ), rev5=-0.5, 40/60 split, EMA=0.035 — NEW BEST
