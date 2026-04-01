@@ -12,3 +12,5 @@ v28-dispersion	4.5197	0.0048	-0.0044	0.176	1.20	0.0	0.0	0	dispersion gate kills 
 v29-dual-tf	13.4266	0.0176	-0.0050	0.529	6.12	0.0	0.0	0	dual lb=5+lb=10, diversification dilutes signal
 v30-gap-fade	-7.2525	-0.0154	-0.0185	0.477	4.00	0.0	0.0	0	fade open-vs-prev-close gap, doesn't work
 v31-ml-filter	7.6385	0.0216	-0.0176	0.490	2.42	0.7	0.7	0	logistic reg filter on v23 picks, only 580 train samples hurts
+v32-1pct-stops	14.1185	0.0362	-0.0065	0.595	4.00	0.0	0.0	0	v23 with 1% SL/TP for real-world viability
+v32b-0.8pct	16.0381	0.0403	-0.0064	0.588	4.00	0.0	0.0	0	v23 with 0.8% SL/TP, highest return
