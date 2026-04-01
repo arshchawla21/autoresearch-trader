@@ -8,3 +8,4 @@ v6-concentrated	8.4104	0.1741	-0.0357	0.539	0.98	0.0	0.0	0	Single most extreme s
 v7-1bar	8.4030	0.1721	-0.0327	0.561	1.00	0.0	0.0	0	1-bar open-to-close lookback, similar to v6
 v8-tight-sl	9.4316	0.1929	-0.0301	0.555	1.00	0.0	0.0	0	Tighter SL (1.0x ATR), wider TP (3.0x ATR)
 v9-tighter-sl	10.2650	0.2082	-0.0302	0.539	1.00	0.0	0.0	0	SL 0.7x ATR, TP 4.0x ATR - new best
+v10-extreme-asym	8.4632	0.1489	-0.0250	0.499	1.00	0.0	0.0	0	SL 0.5x ATR, TP 5.0x - too tight, worse

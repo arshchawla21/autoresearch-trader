@@ -61,8 +61,8 @@ def generate_orders(strategy, data, bar_idx):
 
     direction = "short" if mom > 0 else "long"
 
-    sl_dist = max(atr * 0.7, 0.001) * op
-    tp_dist = max(atr * 4.0, 0.005) * op
+    sl_dist = max(atr * 0.5, 0.0008) * op
+    tp_dist = max(atr * 5.0, 0.006) * op
 
     if direction == "long":
         sl = op - sl_dist
