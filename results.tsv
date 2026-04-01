@@ -16,3 +16,4 @@ v14-hybrid-ls-ml	0.0074	0.0000	-0.0023	0.490	28.00	1.0	1.0	0	L/S base + ML weigh
 v15-ls-30pct	4.2835	0.0014	-0.0025	0.556	28.00	0.0	0.0	0	L/S 30% bar range stops - 55.6% WR
 v15b-ls-25pct	6.0418	0.0018	-0.0016	0.562	28.00	0.0	0.0	0	L/S 25% bar range - best WR 56.2%, sharpe=6.04
 v15c-ls-15pct	5.9735	0.0018	-0.0012	0.542	28.00	0.0	0.0	0	L/S 15% bar range - similar sharpe, lower WR
+v16-ls-asym	48.5452	0.0161	-0.0004	0.719	28.00	0.0	0.0	0	L/S asym SL=25% TP=35% - WR=71.9%!
