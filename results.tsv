@@ -23,3 +23,4 @@ v26-long-only-bear-filter	0.5353	1.50	-4.64	8.5	0.4	0.0	6.7	24.9	NEW BEST Sharpe
 v27-loosened-filter	0.0851	0.08	-9.04	17.5	1.2	0.0	6.7	24.9	Loosened bear filter (-4% vs -2%) + lower threshold (0.55). Much worse — bad trades flood back in.
 v28-always-invested	-0.2697	-1.78	-7.34	52.3	8.0	0.0	7.0	24.9	Always-invested long portfolio (top 8 stocks daily). WIN RATE >50% for first time! But negative returns — losses too large in bears.
 v29-portfolio-tight-stops	-0.3110	-1.89	-7.32	52.0	8.0	0.0	6.9	24.9	Portfolio with v11 stops (1.5x/2x ATR). Win rate 52% but tighter stops add more stop-outs, returns still negative.
+v30-core-satellite	0.3958	0.77	-4.64	52.4	1.4	0.0	6.9	24.9	BREAKTHROUGH: SPY core (0.3) + NN satellite picks. First strategy with positive Sharpe + win rate >50% + positive returns.

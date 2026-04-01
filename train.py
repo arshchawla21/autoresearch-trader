@@ -1,10 +1,12 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v29: Diversified portfolio with proper risk management.
-Combines v28's portfolio approach (for >50% win rate via diversification)
-with v11's stop/target mechanics (1.5x/2.0x ATR for better R:R).
-Bear market exposure reduction prevents catastrophic losses.
+v30: Core-satellite strategy.
+Core: SPY long position every day (0.3 weight) — market drift for win rate.
+Satellite: selective NN picks when confident (0.58 threshold, up to 0.7 weight).
+Bear filter: no satellites in downtrend, reduced SPY core.
+
+Combines v28's daily exposure (win rate >50%) with v26's selectivity (Sharpe).
 
 Usage: uv run train.py
 """
@@ -131,6 +133,13 @@ def build_strategy(train_data):
             optimizer.step()
     model.eval()
 
+    # Find SPY index in tradeable
+    spy_tradeable_idx = None
+    for i, t in enumerate(tickers):
+        if t == "SPY":
+            spy_tradeable_idx = i
+            break
+
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
@@ -138,6 +147,7 @@ def build_strategy(train_data):
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
+        "spy_tradeable_idx": spy_tradeable_idx,
     }
 
 
@@ -149,6 +159,7 @@ def generate_orders(strategy, data, day_idx):
     model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
+    spy_ti = strategy["spy_tradeable_idx"]
     n_tickers = len(tickers)
 
     if day_idx < 21:
@@ -164,47 +175,59 @@ def generate_orders(strategy, data, day_idx):
         logits = model(feats_norm.to(dev)).cpu()
         probs = torch.sigmoid(logits)
 
-    # VIX-based position scaling
-    total_exposure = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
-
-    # In severe bear markets, reduce exposure but don't go to zero
-    if spy_mom < -0.04:
-        total_exposure *= 0.3
-    elif spy_mom < -0.02:
-        total_exposure *= 0.5
-
-    # Rank ALL stocks by probability, pick top 8
-    scored = []
-    for i in range(n_tickers):
-        op = float(today_open[i])
-        if op <= 0 or np.isnan(op):
-            continue
-        p = float(probs[i])
-        ap = float(atr_pct[i])
-        scored.append((i, p, op, ap))
-
-    if not scored:
-        return []
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top_picks = scored[:8]
-
-    # Equal weight across picks
-    weight_each = total_exposure / len(top_picks)
-
-    # v11's proven stop/target mechanics
-    stop_m = 1.5
-    target_m = 2.0
+    vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
     orders = []
-    for (idx, _, op, ap) in top_picks:
+
+    # === CORE: SPY position every day ===
+    spy_op = float(today_open[spy_ti])
+    spy_atr = float(atr_pct[spy_ti])
+    if spy_op > 0 and not np.isnan(spy_op):
+        # Reduce core in bear markets
+        core_weight = 0.3 * vol_scale
+        if spy_mom < -0.02:
+            core_weight *= 0.3  # ~0.09 weight in bear
+        elif spy_mom < 0:
+            core_weight *= 0.7  # ~0.21 in mild downturn
+
         orders.append({
-            "ticker": tickers[idx],
+            "ticker": "SPY",
             "direction": "long",
-            "weight": weight_each,
-            "stop_loss": op * (1 - ap * stop_m),
-            "take_profit": op * (1 + ap * target_m),
+            "weight": core_weight,
+            "stop_loss": spy_op * (1 - spy_atr * 2.0),
+            "take_profit": spy_op * (1 + spy_atr * 3.0),
         })
+
+    # === SATELLITE: selective NN picks ===
+    if spy_mom >= -0.02:  # No satellites in bear
+        satellite_budget = (1.0 - 0.3) * vol_scale  # 0.7 budget
+
+        candidates = []
+        for i in range(n_tickers):
+            if i == spy_ti:  # Don't double up on SPY
+                continue
+            op = float(today_open[i])
+            if op <= 0 or np.isnan(op):
+                continue
+            p = float(probs[i])
+            ap = float(atr_pct[i])
+
+            if p > 0.58:  # v11's proven threshold
+                candidates.append((i, p, op, ap))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            candidates = candidates[:4]
+            weight_each = satellite_budget / len(candidates)
+
+            for (idx, _, op, ap) in candidates:
+                orders.append({
+                    "ticker": tickers[idx],
+                    "direction": "long",
+                    "weight": weight_each,
+                    "stop_loss": op * (1 - ap * 1.5),
+                    "take_profit": op * (1 + ap * 2.0),
+                })
 
     return orders
 
