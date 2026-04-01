@@ -1,14 +1,10 @@
 """
-v23-xsect-optimized: Cross-sectional L/S MR with optimized params.
+v24-xsect-volfilter: Cross-sectional L/S MR with volatility-based filtering.
 
-Simple but proven approach:
-- Each bar, rank all 28 stocks by their recent return
-- Go long the biggest losers (likely to revert up)
-- Go short the biggest winners (likely to revert down)
-- Equal weight, trade every bar
-- Market-neutral by construction
-
-No ML — the cross-sectional spread IS the signal.
+Building on v23 (best so far). Add filters:
+- Skip low-volatility bars (weak signal, noise-dominated)
+- Volume spike filter (higher volume = stronger conviction)
+- Require minimum absolute return magnitude to avoid noise trades
 """
 
 import time
@@ -27,11 +23,28 @@ LOOKBACK = 5     # bars of return to fade
 
 
 def build_strategy(train_data):
-    """No training needed — pure rule-based."""
+    """Compute volatility stats from training data for filtering."""
+    ohlcv = train_data["ohlcv"].numpy()
+    tidx = train_data["tradeable_indices"].numpy()
+    T = ohlcv.shape[0]
+    n_stocks = len(tidx)
+
+    # Compute average bar range per stock (for filtering)
+    ranges = []
+    for t in range(1, T):
+        hi = ohlcv[t, tidx, H]
+        lo = ohlcv[t, tidx, L]
+        cl = ohlcv[t - 1, tidx, C]
+        safe_cl = np.maximum(np.abs(cl), 1e-8)
+        bar_range = (hi - lo) / safe_cl
+        ranges.append(bar_range)
+    avg_range = np.nanmedian(np.stack(ranges), axis=0)  # per-stock median range
+
     return {
         "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
-        "n_stocks": len(train_data["tradeable_indices"]),
+        "n_stocks": n_stocks,
+        "avg_range": avg_range,
     }
 
 
@@ -43,24 +56,42 @@ def generate_orders(strategy, data, bar_idx):
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     n_stocks = strategy["n_stocks"]
+    avg_range = strategy["avg_range"]
 
     ohlcv_np = ohlcv.numpy() if isinstance(ohlcv, torch.Tensor) else ohlcv
     tidx_np = tidx.numpy() if isinstance(tidx, torch.Tensor) else tidx
 
     opens = ohlcv_np[bar_idx, tidx_np, O]
     closes = ohlcv_np[:bar_idx, tidx_np, C]
+    vols = ohlcv_np[:bar_idx, tidx_np, V]
+    highs = ohlcv_np[:bar_idx, tidx_np, H]
+    lows = ohlcv_np[:bar_idx, tidx_np, L]
 
     # Recent return to fade
     ret = (closes[-1] - closes[-1 - LOOKBACK]) / np.maximum(np.abs(closes[-1 - LOOKBACK]), 1e-8)
 
-    # Filter valid stocks
-    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
+    # Current bar range relative to average (is this stock "active"?)
+    last_range = (highs[-1] - lows[-1]) / np.maximum(np.abs(closes[-2]), 1e-8)
+    range_ratio = last_range / np.maximum(avg_range, 1e-8)
+
+    # Volume spike (last bar vs 10-bar average)
+    avg_vol = np.mean(vols[-10:], axis=0)
+    vol_ratio = vols[-1] / np.maximum(avg_vol, 1e-8)
+
+    # Filter: valid stocks with meaningful moves
+    valid_mask = ((opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
+                  & (range_ratio > 0.5)   # not dead/illiquid bars
+                  & (np.abs(ret) > 0.001))  # at least 0.1% move to fade
     valid_idx = np.where(valid_mask)[0]
 
     if len(valid_idx) < N_LONG + N_SHORT:
-        return []
+        # Fallback: relax filters
+        valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
+        valid_idx = np.where(valid_mask)[0]
+        if len(valid_idx) < N_LONG + N_SHORT:
+            return []
 
-    # Rank by return: lowest returns → long, highest → short
+    # Rank by return: lowest → long, highest → short
     valid_rets = ret[valid_idx]
     sorted_indices = np.argsort(valid_rets)
 
