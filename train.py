@@ -1,5 +1,5 @@
 """
-v16-ls-asym: Equal-weight L/S with asymmetric stops (TP > SL).
+v17-ls-asym-tight: Equal-weight L/S with asymmetric stops (SL=20%, TP=30% bar range).
 
 Uses the v6 L/S framework with 25% bar range SL but 35% bar range TP.
 When TP hits, we win 40% more than we lose on SL hit.
@@ -63,8 +63,8 @@ def generate_orders(strategy, data, bar_idx):
     for idx in longs:
         op = float(opens[idx])
         mr = float(median_range[idx])
-        sl_dist = max(mr * 0.25, 0.0004) * op
-        tp_dist = max(mr * 0.35, 0.0006) * op  # TP 40% wider than SL
+        sl_dist = max(mr * 0.20, 0.0003) * op
+        tp_dist = max(mr * 0.30, 0.0005) * op
         orders.append({
             "ticker": tickers[idx], "direction": "long", "weight": w,
             "stop_loss": op - sl_dist, "take_profit": op + tp_dist,
@@ -73,8 +73,8 @@ def generate_orders(strategy, data, bar_idx):
     for idx in shorts:
         op = float(opens[idx])
         mr = float(median_range[idx])
-        sl_dist = max(mr * 0.25, 0.0004) * op
-        tp_dist = max(mr * 0.35, 0.0006) * op
+        sl_dist = max(mr * 0.20, 0.0003) * op
+        tp_dist = max(mr * 0.30, 0.0005) * op
         orders.append({
             "ticker": tickers[idx], "direction": "short", "weight": w,
             "stop_loss": op + sl_dist, "take_profit": op - tp_dist,
