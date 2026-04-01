@@ -1,9 +1,8 @@
 """
-v2-momentum: Short-term momentum strategy with ATR-based stops.
+v3-mean-reversion: Fade short-term moves with tight stops.
 
-Hypothesis: stocks trending in the last few bars will continue for the next bar.
-Use 4-bar momentum to pick direction, ATR for stop/TP calibration.
-Trade the top 3 momentum stocks each bar, equal weight.
+Hypothesis: intraday prices mean-revert. Stocks that moved up over last 4 bars
+will pull back, and vice versa. Use tight ATR-based stops.
 """
 
 import os
@@ -16,18 +15,16 @@ t_start = time.time()
 
 
 def build_strategy(train_data):
-    """Compute ATR stats from training data for stop calibration."""
+    """Compute ATR stats from training data."""
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
 
-    # Compute average ATR per stock (as fraction of price)
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
     lows = ohlcv[:, tidx, L]
 
-    # True range as pct of close
     tr = (highs - lows) / np.maximum(closes, 1e-8)
-    avg_atr_pct = np.nanmean(tr, axis=0)  # per stock
+    avg_atr_pct = np.nanmean(tr, axis=0)
 
     return {
         "tickers": train_data["tradeable_tickers"],
@@ -37,7 +34,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    """Trade top momentum stocks with ATR-based stops."""
+    """Fade short-term momentum."""
     lookback = 4
     if bar_idx < lookback + 1:
         return []
@@ -47,20 +44,16 @@ def generate_orders(strategy, data, bar_idx):
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
 
-    # Current opens
     opens = ohlcv[bar_idx, tidx, O].numpy()
-
-    # Momentum: return over last `lookback` bars
     past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
     current_close = ohlcv[bar_idx - 1, tidx, C].numpy()
     momentum = (current_close - past_close) / np.maximum(past_close, 1e-8)
 
-    # Filter valid stocks
     valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
     if len(valid) == 0:
         return []
 
-    # Sort by absolute momentum, pick top 3
+    # Pick stocks with strongest moves to fade
     abs_mom = np.abs(momentum[valid])
     top_k = min(3, len(valid))
     top_indices = valid[np.argsort(-abs_mom)[:top_k]]
@@ -74,12 +67,12 @@ def generate_orders(strategy, data, bar_idx):
         mom = float(momentum[idx])
         atr = float(avg_atr[idx])
 
-        if abs(mom) < 0.001:  # skip if no meaningful momentum
+        if abs(mom) < 0.001:
             continue
 
-        direction = "long" if mom > 0 else "short"
+        # FADE: go opposite to momentum
+        direction = "short" if mom > 0 else "long"
 
-        # ATR-based stops: 1.5x ATR stop, 2x ATR take-profit
         sl_dist = max(atr * 1.5, 0.002) * op
         tp_dist = max(atr * 2.0, 0.003) * op
 
