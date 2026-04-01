@@ -1,9 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-Selective high-volatility gap-fade with VIX regime filter.
-Only trades on days with large gaps and elevated VIX, targeting gap fill.
-Key: trade infrequently to avoid 10bps cost bleeding.
+Cross-sectional momentum with regime-adaptive sizing and calibrated stops.
+Long top-ranked momentum stocks, short bottom-ranked. Market-neutral-ish
+design for robustness across bull/bear/sideways regimes.
 
 Usage: uv run train.py
 """
@@ -29,21 +29,110 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"]
     tradeable_idx = train_data["tradeable_indices"]
-    macro_idx = train_data["macro_indices"]
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
+    D = ohlcv.shape[0]
 
-    # Find VIX index in all_tickers
+    # Find VIX index
     vix_idx = None
     for j, t in enumerate(all_tickers):
         if t == "^VIX":
             vix_idx = j
             break
 
+    # Compute historical stats for stop/target calibration
+    opens = ohlcv[:, tradeable_idx, O]
+    closes = ohlcv[:, tradeable_idx, C]
+    highs = ohlcv[:, tradeable_idx, H]
+    lows = ohlcv[:, tradeable_idx, L]
+
+    tr = torch.zeros(D, len(tickers))
+    tr[1:] = torch.max(
+        torch.max(highs[1:] - lows[1:], (highs[1:] - closes[:-1]).abs()),
+        (lows[1:] - closes[:-1]).abs()
+    )
+
+    # Optimize stop/target multipliers on training data
+    lookback_opt = min(500, D - 21)
+    best_sharpe = -999
+    best_stop_mult = 1.5
+    best_target_mult = 1.5
+
+    if lookback_opt >= 50:
+        for stop_m in [0.8, 1.0, 1.2, 1.5, 2.0]:
+            for target_m in [0.8, 1.0, 1.5, 2.0, 2.5]:
+                sim_rets = []
+                for d in range(D - lookback_opt, D):
+                    if d < 21:
+                        continue
+                    atr_14 = tr[max(1, d-14):d].mean(dim=0)
+                    atr_pct = (atr_14 / opens[d].clamp(min=1e-8)).clamp(0.003, 0.15)
+
+                    close_10 = closes[d-10]
+                    mom = (closes[d-1] - close_10) / close_10.clamp(min=1e-8)
+                    ranks = mom.argsort(descending=True)
+                    top_3 = ranks[:3]
+                    bot_3 = ranks[-3:]
+
+                    day_ret = 0.0
+                    w = 1.0 / 6.0
+
+                    for idx in top_3:
+                        op = float(opens[d, idx])
+                        hi = float(highs[d, idx])
+                        lo = float(lows[d, idx])
+                        cl = float(closes[d, idx])
+                        ap = float(atr_pct[idx])
+                        sl = op * (1 - ap * stop_m)
+                        tp = op * (1 + ap * target_m)
+                        s_hit = lo <= sl
+                        l_hit = hi >= tp
+                        if s_hit and l_hit:
+                            ex = tp if cl > op else sl
+                        elif l_hit:
+                            ex = tp
+                        elif s_hit:
+                            ex = sl
+                        else:
+                            ex = cl
+                        day_ret += w * ((ex - op) / op - 0.0002)
+
+                    for idx in bot_3:
+                        op = float(opens[d, idx])
+                        hi = float(highs[d, idx])
+                        lo = float(lows[d, idx])
+                        cl = float(closes[d, idx])
+                        ap = float(atr_pct[idx])
+                        sl = op * (1 + ap * stop_m)
+                        tp = op * (1 - ap * target_m)
+                        s_hit = hi >= sl
+                        l_hit = lo <= tp
+                        if s_hit and l_hit:
+                            ex = tp if cl < op else sl
+                        elif l_hit:
+                            ex = tp
+                        elif s_hit:
+                            ex = sl
+                        else:
+                            ex = cl
+                        day_ret += w * ((op - ex) / op - 0.0002)
+
+                    sim_rets.append(day_ret)
+
+                sim_rets = np.array(sim_rets)
+                if len(sim_rets) > 10 and sim_rets.std() > 1e-10:
+                    sharpe = np.sqrt(252) * sim_rets.mean() / sim_rets.std()
+                    if sharpe > best_sharpe:
+                        best_sharpe = sharpe
+                        best_stop_mult = stop_m
+                        best_target_mult = target_m
+
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "vix_idx": vix_idx,
+        "stop_mult": best_stop_mult,
+        "target_mult": best_target_mult,
     }
 
 
@@ -52,6 +141,8 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     vix_idx = strategy["vix_idx"]
+    stop_mult = strategy["stop_mult"]
+    target_mult = strategy["target_mult"]
 
     if day_idx < 21:
         return []
@@ -59,10 +150,7 @@ def generate_orders(strategy, data, day_idx):
     today_open = ohlcv[day_idx, tradeable_idx, O]
     prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
 
-    # VIX level (use yesterday's close as proxy for current regime)
-    vix_level = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx is not None else 20.0
-
-    # Compute ATR over last 14 days
+    # ATR over last 14 days
     highs = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
     lows = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
     closes_atr = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
@@ -73,84 +161,65 @@ def generate_orders(strategy, data, day_idx):
     atr = tr.mean(dim=0)
     atr_pct = (atr / today_open.clamp(min=1e-8)).clamp(min=0.003, max=0.15)
 
-    # Gap = (open - prev_close) / prev_close
-    gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
+    # 10-day momentum
+    close_10 = ohlcv[day_idx - 10, tradeable_idx, C]
+    mom_10d = (prev_close - close_10) / close_10.clamp(min=1e-8)
 
-    # 20-day momentum for trend context
+    # 20-day momentum
     close_20 = ohlcv[day_idx - 20, tradeable_idx, C]
     mom_20d = (prev_close - close_20) / close_20.clamp(min=1e-8)
 
-    n_tickers = len(tickers)
-    candidates = []
+    # Combined signal
+    signal = 0.6 * mom_10d + 0.4 * mom_20d
 
-    # Only trade when VIX > 18 (elevated fear = bigger intraday moves)
-    min_gap = 0.005 if vix_level > 22 else 0.008 if vix_level > 18 else 0.012
+    # Cross-sectional rank
+    ranks = signal.argsort(descending=True)
 
-    for i in range(n_tickers):
-        open_price = float(today_open[i])
-        if open_price <= 0 or np.isnan(open_price):
-            continue
+    # VIX regime scaling
+    if vix_idx is not None:
+        vix = float(ohlcv[day_idx - 1, vix_idx, C])
+        if vix > 35:
+            scale = 0.5
+        elif vix > 28:
+            scale = 0.7
+        else:
+            scale = 1.0
+    else:
+        scale = 1.0
 
-        g = float(gap[i])
-        atr_p = float(atr_pct[i])
-        mom = float(mom_20d[i])
-
-        # Large gap down -> long (gap fade)
-        # Stronger signal if stock has positive 20d momentum (gap against trend)
-        if g < -min_gap:
-            # Gap against uptrend is strongest signal
-            signal = abs(g)
-            if mom > 0:
-                signal *= 1.5  # gap down in uptrend = stronger reversion
-
-            stop_pct = atr_p * 1.5    # wider stop to avoid getting shaken out
-            target_pct = abs(g) * 0.6  # target 60% gap fill
-            target_pct = max(target_pct, atr_p * 0.8)
-            target_pct = min(target_pct, atr_p * 3.0)
-
-            candidates.append({
-                "ticker": tickers[i],
-                "direction": "long",
-                "signal_strength": signal,
-                "stop_loss": open_price * (1 - stop_pct),
-                "take_profit": open_price * (1 + target_pct),
-            })
-        # Large gap up -> short (gap fade)
-        elif g > min_gap:
-            signal = abs(g)
-            if mom < 0:
-                signal *= 1.5  # gap up in downtrend = stronger reversion
-
-            stop_pct = atr_p * 1.5
-            target_pct = abs(g) * 0.6
-            target_pct = max(target_pct, atr_p * 0.8)
-            target_pct = min(target_pct, atr_p * 3.0)
-
-            candidates.append({
-                "ticker": tickers[i],
-                "direction": "short",
-                "signal_strength": signal,
-                "stop_loss": open_price * (1 + stop_pct),
-                "take_profit": open_price * (1 - target_pct),
-            })
-
-    if not candidates:
-        return []
-
-    # Take top 3 by signal strength
-    candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
-    candidates = candidates[:3]
-
-    weight_each = min(1.0 / len(candidates), 0.5)
+    n_each = 3
+    top_n = ranks[:n_each]
+    bot_n = ranks[-n_each:]
+    weight_each = scale / (2 * n_each)
 
     orders = []
-    for c in candidates:
+
+    for i in range(n_each):
+        idx = int(top_n[i])
+        op = float(today_open[idx])
+        if op <= 0 or np.isnan(op):
+            continue
+        ap = float(atr_pct[idx])
         orders.append({
-            "ticker": c["ticker"],
-            "direction": c["direction"],
+            "ticker": tickers[idx],
+            "direction": "long",
             "weight": weight_each,
-            "stop_loss": c["stop_loss"],
-            "take_profit": c["take_profit"],
+            "stop_loss": op * (1 - ap * stop_mult),
+            "take_profit": op * (1 + ap * target_mult),
+        })
+
+    for i in range(n_each):
+        idx = int(bot_n[i])
+        op = float(today_open[idx])
+        if op <= 0 or np.isnan(op):
+            continue
+        ap = float(atr_pct[idx])
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "short",
+            "weight": weight_each,
+            "stop_loss": op * (1 + ap * stop_mult),
+            "take_profit": op * (1 - ap * target_mult),
         })
 
     return orders
