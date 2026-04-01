@@ -4,3 +4,4 @@ v2-gap-fade	-6.5156	-0.0109	-0.0177	0.471	23.35	0.0	0.0	0	Fade open-vs-prev-clos
 v3-meanrev-all	5.9950	0.0113	-0.0083	0.490	25.88	0.0	0.0	0	2-bar MR all stocks mom-weighted
 v4-concentrated	5.0249	0.0233	-0.0187	0.497	1.00	0.0	0.0	0	Single biggest mover fade - diversified wins
 v5-mom-follow	-4.9008	-0.0092	-0.0163	0.484	25.88	0.0	0.0	0	Follow momentum - wrong direction
+v6-long-short	12.7178	0.0092	-0.0021	0.575	28.00	0.0	0.0	0	Market-neutral L/S all stocks - NEW BEST

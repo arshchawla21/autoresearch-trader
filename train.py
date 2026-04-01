@@ -1,8 +1,10 @@
 """
-v5-momentum-follow: FOLLOW momentum instead of fading. All stocks, every bar.
+v6-long-short-all: Market-neutral long/short portfolio every bar.
 
-Hypothesis: maybe this market regime trends more than it reverts.
-Trade with the direction of 2-bar momentum on all stocks.
+Hypothesis: go long the worst performers and short the best performers
+across ALL stocks every bar. Equal-weight long and short sides.
+This is pure cross-sectional mean-reversion with zero market exposure.
+With zero fees, maximum trade frequency is free.
 """
 
 import time
@@ -42,46 +44,42 @@ def generate_orders(strategy, data, bar_idx):
     momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
 
     valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
-    if len(valid) == 0:
+    if len(valid) < 4:
         return []
 
-    abs_mom = np.abs(momentum[valid])
-    total = abs_mom.sum()
-    if total < 1e-10:
-        return []
+    # Rank stocks by momentum
+    ranked = valid[np.argsort(momentum[valid])]
 
-    weights = abs_mom / total
+    # Bottom half = go long (losers), top half = go short (winners)
+    n = len(ranked)
+    half = n // 2
+    longs = ranked[:half]
+    shorts = ranked[half:]
+
+    total_positions = len(longs) + len(shorts)
+    w = 1.0 / total_positions
+
     orders = []
-
-    for i, idx in enumerate(valid):
-        w = float(weights[i])
-        if w < 0.005:
-            continue
-
+    for idx in longs:
         ticker = tickers[idx]
         op = float(opens[idx])
-        mom = float(momentum[idx])
         atr = float(avg_atr[idx])
-
-        # FOLLOW momentum (not fade)
-        direction = "long" if mom > 0 else "short"
-
         sl_dist = max(atr * 0.7, 0.001) * op
         tp_dist = max(atr * 1.0, 0.0015) * op
-
-        if direction == "long":
-            sl = op - sl_dist
-            tp = op + tp_dist
-        else:
-            sl = op + sl_dist
-            tp = op - tp_dist
-
         orders.append({
-            "ticker": ticker,
-            "direction": direction,
-            "weight": w,
-            "stop_loss": sl,
-            "take_profit": tp,
+            "ticker": ticker, "direction": "long", "weight": w,
+            "stop_loss": op - sl_dist, "take_profit": op + tp_dist,
+        })
+
+    for idx in shorts:
+        ticker = tickers[idx]
+        op = float(opens[idx])
+        atr = float(avg_atr[idx])
+        sl_dist = max(atr * 0.7, 0.001) * op
+        tp_dist = max(atr * 1.0, 0.0015) * op
+        orders.append({
+            "ticker": ticker, "direction": "short", "weight": w,
+            "stop_loss": op + sl_dist, "take_profit": op - tp_dist,
         })
 
     return orders
