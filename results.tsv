@@ -7,3 +7,4 @@ v10-refined-signals	-0.2181	-1.38	-12.06	45.5	3.2	0.0	0.6	0.0	No fallback, 5d re
 v11-neural-net	0.4536	1.67	-6.89	13.7	0.9	0.0	6.9	24.9	MLP trained on features->intraday sign. First positive Sharpe! Very selective, low trade count.
 v12-nn-lower-thresh	-0.4951	-4.96	-12.78	45.3	4.2	0.0	6.8	24.9	NN with lower confidence threshold (0.53). Trading more but losing edge. NN only works when selective.
 v13-hybrid-nn-rules	0.2400	1.68	-6.17	11.4	0.6	0.0	7.2	24.9	Hybrid NN+rules: too restrictive requiring both to agree. Trades only 0.6/day.
+v14-nn-rich-features	0.0002	-0.01	-11.30	21.9	1.6	0.0	8.2	26.6	Larger NN + more features + weighted loss. Overfitting killed it.
