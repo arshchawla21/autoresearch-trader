@@ -29,3 +29,4 @@ v32-wider-spy-stops	0.3592	0.62	-4.76	52.4	1.4	0.0	6.9	24.9	Same as v30 but wide
 v33-v26-plus-spy-core	0.4949	1.13	-4.60	42.7	1.2	0.0	6.8	24.9	v26 selectivity + 0.15 SPY core. Great Sharpe but win rate 42.7% not >50%.
 v34-tighter-satellites	0.2040	0.40	-4.46	52.1	1.2	0.0	6.9	24.9	v30 with tighter satellite threshold (0.60). Sharpe dropped — too few satellites to drive alpha.
 v35-looser-satellites	0.1051	0.12	-6.38	52.6	1.7	0.0	6.9	24.9	v30 with looser satellite threshold (0.56). More noise, not more alpha. v30 (0.58) is the sweet spot.
+v36-aggressive-zero-fee	0.4700	1.52	-5.51	52.1	10.0	0.0	9.4	26.6	Zero fee L5/S5 cross-sectional. 10 trades/day, 52% win rate. Strong base to build on.

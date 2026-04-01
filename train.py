@@ -1,9 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v35: v30 with slightly looser satellites (0.56) for more alpha.
-v30 is the best balanced strategy (Sharpe=0.40, WR=52.4%).
-Try slightly more satellite trades for additional alpha.
+v36: AGGRESSIVE zero-fee strategy. Max trades, max exposure.
+With 0 transaction costs, trade EVERYTHING with any signal.
+Go long top stocks, short bottom stocks. Full weight every day.
+NN classification + cross-sectional ranking. No selectivity needed.
 
 Usage: uv run train.py
 """
@@ -16,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from prepare import O, H, L, C, evaluate
+from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 torch.manual_seed(42)
@@ -27,13 +28,13 @@ class IntradayPredictor(nn.Module):
     def __init__(self, n_features):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_features, 64),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
+            nn.Dropout(0.15),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 1),
+            nn.Dropout(0.15),
+            nn.Linear(64, 1),
         )
 
     def forward(self, x):
@@ -43,6 +44,9 @@ class IntradayPredictor(nn.Module):
 def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     N = len(tradeable_idx)
     prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
+    prev_open = ohlcv[day_idx - 1, tradeable_idx, O]
+    prev_high = ohlcv[day_idx - 1, tradeable_idx, H]
+    prev_low = ohlcv[day_idx - 1, tradeable_idx, L]
     today_open = ohlcv[day_idx, tradeable_idx, O]
 
     def ret(d):
@@ -52,10 +56,10 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     r1, r3, r5, r10, r20 = ret(1), ret(3), ret(5), ret(10), ret(20)
     gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
 
-    highs = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
-    lows = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
-    closes_p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
-    tr = torch.max(torch.max(highs - lows, (highs - closes_p).abs()), (lows - closes_p).abs())
+    highs_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
+    lows_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
+    closes_14p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
+    tr = torch.max(torch.max(highs_14 - lows_14, (highs_14 - closes_14p).abs()), (lows_14 - closes_14p).abs())
     atr_pct = (tr.mean(dim=0) / today_open.clamp(min=1e-8)).clamp(0.003, 0.15)
 
     closes_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, C]
@@ -67,16 +71,39 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     vix_val = float(ohlcv[day_idx - 1, vix_idx, C]) / 30.0 if vix_idx else 0.5
     spy_c = float(ohlcv[day_idx - 1, spy_idx, C])
     spy_20 = float(ohlcv[day_idx - 20, spy_idx, C])
+    spy_5 = float(ohlcv[day_idx - 5, spy_idx, C])
     spy_mom = (spy_c - spy_20) / spy_20
+    spy_mom5 = (spy_c - spy_5) / spy_5
 
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
+
+    # Candlestick features
+    prev_range = (prev_high - prev_low).clamp(min=1e-8)
+    close_position = (prev_close - prev_low) / prev_range
+    body_ratio = (prev_close - prev_open).abs() / prev_range
+
+    # Volume
+    vol_20d = ohlcv[day_idx - 20:day_idx, tradeable_idx, V]
+    vol_avg = vol_20d.mean(dim=0).clamp(min=1.0)
+    vol_yesterday = ohlcv[day_idx - 1, tradeable_idx, V]
+    vol_ratio = (vol_yesterday / vol_avg).clamp(0.1, 5.0)
+
+    gap_atr = gap / atr_pct.clamp(min=1e-6)
+
+    # Breadth
+    prev_day_close = ohlcv[day_idx - 1, tradeable_idx, C]
+    prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
+    breadth = (prev_day_close > prev_day_open).float().mean().item()
 
     features = torch.stack([
         r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
         torch.full((N,), vix_val),
         torch.full((N,), spy_mom),
+        torch.full((N,), spy_mom5),
         rank_10d,
+        close_position, body_ratio, vol_ratio, gap_atr,
+        torch.full((N,), breadth),
     ], dim=1)
 
     return features, atr_pct, spy_mom, vix_val * 30.0
@@ -117,7 +144,7 @@ def build_strategy(train_data):
 
     batch_size = 2048
     n_samples = X_train.shape[0]
-    n_epochs = min(50, max(5, 300 * 1000 // n_samples))
+    n_epochs = min(60, max(10, 400 * 1000 // n_samples))
 
     model.train()
     for _ in range(n_epochs):
@@ -130,12 +157,6 @@ def build_strategy(train_data):
             optimizer.step()
     model.eval()
 
-    spy_tradeable_idx = None
-    for i, t in enumerate(tickers):
-        if t == "SPY":
-            spy_tradeable_idx = i
-            break
-
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
@@ -143,7 +164,6 @@ def build_strategy(train_data):
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
-        "spy_tradeable_idx": spy_tradeable_idx,
     }
 
 
@@ -155,7 +175,6 @@ def generate_orders(strategy, data, day_idx):
     model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
-    spy_ti = strategy["spy_tradeable_idx"]
     n_tickers = len(tickers)
 
     if day_idx < 21:
@@ -165,66 +184,55 @@ def generate_orders(strategy, data, day_idx):
     feats, atr_pct, spy_mom, vix = compute_features(
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
-
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
         logits = model(feats_norm.to(dev)).cpu()
         probs = torch.sigmoid(logits)
 
-    vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
+    # With zero fees, go ALL IN every day
+    # Long the top 5 highest-probability stocks
+    # Short the bottom 5 lowest-probability stocks
 
-    orders = []
-
-    # === CORE: SPY position every day (v30 approach) ===
-    spy_op = float(today_open[spy_ti])
-    spy_atr = float(atr_pct[spy_ti])
-    if spy_op > 0 and not np.isnan(spy_op):
-        core_weight = 0.3 * vol_scale
-        if spy_mom < -0.02:
-            core_weight *= 0.3  # Reduced in bear
-        elif spy_mom < 0:
-            core_weight *= 0.7  # Reduced in mild downturn
-        orders.append({
-            "ticker": "SPY",
-            "direction": "long",
-            "weight": core_weight,
-            "stop_loss": spy_op * (1 - spy_atr * 2.0),
-            "take_profit": spy_op * (1 + spy_atr * 3.0),
-        })
-
-    # === SATELLITE: selective NN picks (only in non-bear) ===
-    if spy_mom < -0.02:
-        return orders  # Core only in bear
-
-    satellite_budget = 0.70 * vol_scale
-
-    candidates = []
+    scored = []
     for i in range(n_tickers):
-        if i == spy_ti:
-            continue
         op = float(today_open[i])
         if op <= 0 or np.isnan(op):
             continue
         p = float(probs[i])
         ap = float(atr_pct[i])
+        scored.append((i, p, op, ap))
 
-        if p > 0.56:  # Slightly looser for more satellite alpha
-            candidates.append((i, p, op, ap))
+    if len(scored) < 10:
+        return []
 
-    if candidates:
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        candidates = candidates[:5]
-        weight_each = satellite_budget / len(candidates)
+    scored.sort(key=lambda x: x[1], reverse=True)
 
-        for (idx, _, op, ap) in candidates:
-            orders.append({
-                "ticker": tickers[idx],
-                "direction": "long",
-                "weight": weight_each,
-                "stop_loss": op * (1 - ap * 1.5),
-                "take_profit": op * (1 + ap * 2.0),
-            })
+    n_long = 5
+    n_short = 5
+    longs = scored[:n_long]
+    shorts = scored[-n_short:]
+
+    weight_each = 1.0 / (n_long + n_short)
+
+    orders = []
+    for (idx, _, op, ap) in longs:
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "long",
+            "weight": weight_each,
+            "stop_loss": op * (1 - ap * 1.5),
+            "take_profit": op * (1 + ap * 2.0),
+        })
+
+    for (idx, _, op, ap) in shorts:
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "short",
+            "weight": weight_each,
+            "stop_loss": op * (1 + ap * 1.5),
+            "take_profit": op * (1 - ap * 2.0),
+        })
 
     return orders
 
