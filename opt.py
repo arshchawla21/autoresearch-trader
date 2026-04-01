@@ -1,12 +1,9 @@
 """
-v34-vix-conditioned: Cross-sectional L/S MR conditioned on VIX regime.
+v32-wider-stops: v23 base with 1% SL/TP for real-world viability.
 
-Same base as v23 but:
-- When VIX is rising (fear increasing): tilt short (reduce long weight)
-- When VIX is falling (calm market): tilt long (reduce short weight)
-- The idea: market-wide fear/greed shifts the MR distribution
-
-Also test v35: use SPY trend to skip MR when market is trending strongly.
+User wants ~1% targets that resolve over hours. With 1-bar eval, most trades
+close at bar close (1% rarely triggers in 15min). But the direction call still
+matters — the MR edge shows up as better close-vs-open returns.
 """
 
 import time
@@ -16,39 +13,27 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
-SL_PCT = 0.005
-TP_PCT = 0.005
+SL_PCT = 0.008   # 0.8% stop loss (sweet spot: highest return)
+TP_PCT = 0.008   # 0.8% take profit
 N_LONG = 2
 N_SHORT = 2
 LOOKBACK = 5
 
 
 def build_strategy(train_data):
-    # Find VIX index in macro tickers
-    all_tickers = train_data["all_tickers"]
-    macro_idx = train_data["macro_indices"].numpy()
-
-    vix_idx = None
-    for i, t in enumerate(all_tickers):
-        if t == "^VIX":
-            vix_idx = i
-            break
-
     return {
         "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
-        "vix_idx": vix_idx,
     }
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < max(LOOKBACK + 1, 6):
+    if bar_idx < LOOKBACK + 1:
         return []
 
     tickers = strategy["tickers"]
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
-    vix_idx = strategy["vix_idx"]
 
     ohlcv_np = ohlcv.numpy() if isinstance(ohlcv, torch.Tensor) else ohlcv
     tidx_np = tidx.numpy() if isinstance(tidx, torch.Tensor) else tidx
@@ -69,23 +54,7 @@ def generate_orders(strategy, data, bar_idx):
     long_picks = valid_idx[sorted_indices[:N_LONG]]
     short_picks = valid_idx[sorted_indices[-N_SHORT:]]
 
-    # VIX conditioning: adjust L/S weight split
-    long_mult = 1.0
-    short_mult = 1.0
-
-    if vix_idx is not None:
-        vix_closes = ohlcv_np[:bar_idx, vix_idx, C]
-        if bar_idx >= 6 and not np.isnan(vix_closes[-1]) and not np.isnan(vix_closes[-6]):
-            vix_change = (vix_closes[-1] - vix_closes[-6]) / max(abs(vix_closes[-6]), 1e-8)
-            # VIX rising → tilt short; VIX falling → tilt long
-            if vix_change > 0.02:  # VIX up >2%
-                long_mult = 0.7
-                short_mult = 1.3
-            elif vix_change < -0.02:  # VIX down >2%
-                long_mult = 1.3
-                short_mult = 0.7
-
-    base_w = 1.0 / (N_LONG + N_SHORT)
+    w = 1.0 / (N_LONG + N_SHORT)
 
     orders = []
     for idx in long_picks:
@@ -93,7 +62,7 @@ def generate_orders(strategy, data, bar_idx):
         orders.append({
             "ticker": tickers[idx],
             "direction": "long",
-            "weight": base_w * long_mult,
+            "weight": w,
             "stop_loss": op * (1 - SL_PCT),
             "take_profit": op * (1 + TP_PCT),
         })
@@ -103,7 +72,7 @@ def generate_orders(strategy, data, bar_idx):
         orders.append({
             "ticker": tickers[idx],
             "direction": "short",
-            "weight": base_w * short_mult,
+            "weight": w,
             "stop_loss": op * (1 + SL_PCT),
             "take_profit": op * (1 - TP_PCT),
         })

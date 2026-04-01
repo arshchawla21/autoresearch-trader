@@ -1,10 +1,9 @@
 """
-Visualize day-trading backtest results for a strategy.
+Visualize 15-minute intraday day-trading backtest results for a strategy.
 
 Usage:
-    python visualise.py                     # backtest last 6 months, show summary
+    python visualise.py                     # backtest out-of-sample period, show summary
     python visualise.py AAPL                # per-stock breakdown for AAPL
-    python visualise.py --slice 5           # use slice 5 (0-indexed) for backtest
     python visualise.py --all-stocks        # show per-stock heatmap
 
 Requires: matplotlib, prepare.py data cached.
@@ -12,34 +11,14 @@ Requires: matplotlib, prepare.py data cached.
 
 import sys
 import argparse
+import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from dateutil.relativedelta import relativedelta
 
 from prepare import (
-    H, L, C, load_data, run_backtest,
-    NUM_SLICES, SLICE_MONTHS,
+    H, L, C, load_data, run_backtest, _find_date_idx
 )
-
-
-def get_slice_boundaries(dates):
-    """Compute 6-month slice boundaries from the data."""
-    n_days = len(dates)
-    start_date = dates[0]
-    boundaries = []
-    d = start_date
-    while True:
-        idx = next((i for i, dt in enumerate(dates) if dt >= d), n_days)
-        if idx >= n_days:
-            boundaries.append(n_days)
-            break
-        boundaries.append(idx)
-        d = d + relativedelta(months=SLICE_MONTHS)
-    if boundaries[-1] < n_days:
-        boundaries.append(n_days)
-    return boundaries
-
 
 # ---------------------------------------------------------------------------
 # Per-stock trade analysis
@@ -51,7 +30,7 @@ def plot_stock_trades(data, result, ticker):
 
     4-panel chart:
     1. Price with trade entry/exit markers
-    2. Daily P&L from this stock
+    2. Interval P&L from this stock
     3. Cumulative return from this stock
     4. Trade outcome distribution
     """
@@ -64,7 +43,7 @@ def plot_stock_trades(data, result, ticker):
     j = tickers.index(ticker)
     tradeable_idx = data["tradeable_indices"]
     test_dates = result["test_dates"]
-    per_day = result["per_day_trades"]
+    per_interval = result["per_interval_trades"]
 
     # Get price data for test period
     test_start_idx = next(i for i, d in enumerate(data["dates"]) if d == test_dates[0])
@@ -76,21 +55,21 @@ def plot_stock_trades(data, result, ticker):
     prices_low = ohlcv[:, L]
 
     # Extract trades for this ticker
-    stock_daily_ret = np.zeros(len(test_dates))
-    entry_days, entry_prices, entry_dirs = [], [], []
-    exit_days, exit_prices = [], []
+    stock_interval_ret = np.zeros(len(test_dates))
+    entry_bars, entry_prices, entry_dirs = [], [], []
+    exit_bars, exit_prices = [], []
     stop_hits, limit_hits, close_exits = 0, 0, 0
     trade_returns = []
 
-    for day_i, trades in enumerate(per_day):
+    for bar_i, trades in enumerate(per_interval):
         for t in trades:
             if t["ticker"] != ticker:
                 continue
-            stock_daily_ret[day_i] += t["weight"] * t["return"]
-            entry_days.append(day_i)
+            stock_interval_ret[bar_i] += t["weight"] * t["return"]
+            entry_bars.append(bar_i)
             entry_prices.append(t["entry_price"])
             entry_dirs.append(t["direction"])
-            exit_days.append(day_i)
+            exit_bars.append(bar_i)
             exit_prices.append(t["exit_price"])
             trade_returns.append(t["return"])
 
@@ -107,7 +86,7 @@ def plot_stock_trades(data, result, ticker):
         return
 
     trade_returns = np.array(trade_returns)
-    cum_ret = np.cumprod(1 + stock_daily_ret) - 1
+    cum_ret = np.cumprod(1 + stock_interval_ret) - 1
 
     # ── Plot ──────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(4, 1, figsize=(18, 20), sharex=False,
@@ -130,19 +109,19 @@ def plot_stock_trades(data, result, ticker):
     ax.fill_between(d, prices_low, prices_high, color="#bdc3c7", alpha=0.2, label="High-Low range")
 
     # Entry/exit markers
-    for i in range(len(entry_days)):
-        day_i = entry_days[i]
+    for i in range(len(entry_bars)):
+        bar_i = entry_bars[i]
         is_long = entry_dirs[i] == "long"
         color = "#2ecc71" if is_long else "#e74c3c"
         marker_entry = "^" if is_long else "v"
 
-        ax.scatter(d[day_i], entry_prices[i], color=color, marker=marker_entry,
+        ax.scatter(d[bar_i], entry_prices[i], color=color, marker=marker_entry,
                    s=30, zorder=5, alpha=0.7)
-        ax.scatter(d[day_i], exit_prices[i], color=color, marker="x",
+        ax.scatter(d[bar_i], exit_prices[i], color=color, marker="x",
                    s=25, zorder=5, alpha=0.5)
 
     ax.set_ylabel("Price ($)", fontsize=11)
-    ax.set_title(f"{ticker} — Day Trading Backtest", fontsize=16, fontweight="bold", pad=15)
+    ax.set_title(f"{ticker} — Intraday Day Trading Backtest", fontsize=16, fontweight="bold", pad=15)
 
     from matplotlib.lines import Line2D
     legend_elements = [
@@ -153,13 +132,13 @@ def plot_stock_trades(data, result, ticker):
     ]
     ax.legend(handles=legend_elements, loc="upper left", fontsize=9, framealpha=0.9)
 
-    # Panel 2: Daily P&L
+    # Panel 2: Interval P&L
     ax = axes[1]
-    colors_bar = ["#2ecc71" if p >= 0 else "#e74c3c" for p in stock_daily_ret]
-    ax.bar(d, stock_daily_ret * 10000, color=colors_bar, alpha=0.6, width=1.5)
+    colors_bar = ["#2ecc71" if p >= 0 else "#e74c3c" for p in stock_interval_ret]
+    ax.bar(d, stock_interval_ret * 10000, color=colors_bar, alpha=0.6, width=0.01) # thin width for 15m
     ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
-    ax.set_ylabel("Daily P&L (bps)", fontsize=11)
-    ax.set_title(f"{ticker} — Daily P&L Contribution", fontsize=12, pad=8)
+    ax.set_ylabel("Interval P&L (bps)", fontsize=11)
+    ax.set_title(f"{ticker} — 15m P&L Contribution", fontsize=12, pad=8)
     ax.set_facecolor(bg_color)
     ax.grid(True, alpha=0.15, linewidth=0.5)
 
@@ -190,10 +169,9 @@ def plot_stock_trades(data, result, ticker):
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.15, linewidth=0.5)
 
-    # Date formatting for time-series panels
+    # Date formatting for time-series panels (Intraday style)
     for ax_ts in axes[:3]:
-        ax_ts.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
-        ax_ts.xaxis.set_major_locator(mdates.MonthLocator())
+        ax_ts.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         plt.setp(ax_ts.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
     # Stats annotation
@@ -201,8 +179,9 @@ def plot_stock_trades(data, result, ticker):
     avg_win = trade_returns[trade_returns > 0].mean() * 100 if (trade_returns > 0).any() else 0
     avg_loss = trade_returns[trade_returns <= 0].mean() * 100 if (trade_returns <= 0).any() else 0
     total_ret = cum_ret[-1] * 100 if len(cum_ret) > 0 else 0
-    sr = stock_daily_ret
-    sharpe = float(np.sqrt(252) * sr.mean() / sr.std()) if sr.std() > 1e-10 else 0
+    sr = stock_interval_ret
+    # 6552 periods = 252 days * 26 (15m periods per day)
+    sharpe = float(np.sqrt(6552) * sr.mean() / sr.std()) if sr.std() > 1e-10 else 0
 
     stats_text = (
         f"  {ticker} Trade Stats\n"
@@ -243,31 +222,31 @@ def plot_portfolio_overview(data, result):
     3-panel chart:
     1. Equity curve with drawdown shading
     2. Per-stock cumulative P&L heatmap
-    3. Daily trade count and portfolio utilization
+    3. Interval trade count and portfolio utilization
     """
     test_dates = result["test_dates"]
-    daily_returns = result["daily_returns"]
-    per_day = result["per_day_trades"]
+    interval_returns = result["interval_returns"]
+    per_interval = result["per_interval_trades"]
     tickers = data["tradeable_tickers"]
 
     d = test_dates
-    cum = np.cumprod(1 + daily_returns)
+    cum = np.cumprod(1 + interval_returns)
     peak = np.maximum.accumulate(cum)
     drawdown = cum / peak - 1
 
-    # Per-stock daily returns
+    # Per-stock interval returns
     n_tickers = len(tickers)
     stock_rets = np.zeros((len(d), n_tickers))
-    daily_trade_count = np.zeros(len(d))
-    daily_utilization = np.zeros(len(d))
+    interval_trade_count = np.zeros(len(d))
+    interval_utilization = np.zeros(len(d))
 
-    for day_i, trades in enumerate(per_day):
-        daily_trade_count[day_i] = len(trades)
+    for bar_i, trades in enumerate(per_interval):
+        interval_trade_count[bar_i] = len(trades)
         for t in trades:
             j = tickers.index(t["ticker"]) if t["ticker"] in tickers else -1
             if j >= 0:
-                stock_rets[day_i, j] += t["weight"] * t["return"]
-                daily_utilization[day_i] += t["weight"]
+                stock_rets[bar_i, j] += t["weight"] * t["return"]
+                interval_utilization[bar_i] += t["weight"]
 
     stock_cum = np.cumsum(stock_rets, axis=0)
 
@@ -287,7 +266,7 @@ def plot_portfolio_overview(data, result):
     ax.fill_between(d, drawdown * 100, 0, color="#e74c3c", alpha=0.15, label="Drawdown")
     ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
     ax.set_ylabel("Return / Drawdown (%)", fontsize=11)
-    ax.set_title("Portfolio Equity Curve", fontsize=16, fontweight="bold", pad=15)
+    ax.set_title("Portfolio Equity Curve (Out-of-Sample)", fontsize=16, fontweight="bold", pad=15)
     ax.legend(fontsize=10, loc="upper left", framealpha=0.9)
 
     # Panel 2: Per-stock cumulative P&L
@@ -314,32 +293,31 @@ def plot_portfolio_overview(data, result):
     else:
         ax.legend(fontsize=6, loc="upper left", ncol=5, framealpha=0.9)
 
-    # Panel 3: Daily trade count + utilization
+    # Panel 3: Interval trade count + utilization
     ax = axes[2]
     ax.set_facecolor(bg_color)
     ax.grid(True, alpha=0.15, linewidth=0.5)
 
-    ax.bar(d, daily_trade_count, color="#3498db", alpha=0.5, width=1.5, label="# Trades")
+    ax.bar(d, interval_trade_count, color="#3498db", alpha=0.5, width=0.01, label="# Trades")
     ax2 = ax.twinx()
-    ax2.plot(d, daily_utilization * 100, color="#e67e22", linewidth=1, alpha=0.7, label="Utilization %")
+    ax2.plot(d, interval_utilization * 100, color="#e67e22", linewidth=1, alpha=0.7, label="Utilization %")
     ax2.set_ylabel("Portfolio Utilization (%)", fontsize=10, color="#e67e22")
 
-    ax.set_ylabel("# Trades", fontsize=11)
+    ax.set_ylabel("# Trades per 15m", fontsize=11)
     ax.set_xlabel("Date", fontsize=11)
-    ax.set_title("Daily Activity", fontsize=12, pad=8)
+    ax.set_title("Activity Profile", fontsize=12, pad=8)
     ax.legend(fontsize=9, loc="upper left")
     ax2.legend(fontsize=9, loc="upper right")
 
-    # Date formatting
+    # Date formatting (Intraday style)
     for ax_i in axes:
-        ax_i.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
-        ax_i.xaxis.set_major_locator(mdates.MonthLocator())
+        ax_i.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         plt.setp(ax_i.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
     # Stats
     metrics = result["metrics"]
-    total_trades = sum(len(t) for t in per_day)
-    active_days = sum(1 for t in per_day if len(t) > 0)
+    total_trades = sum(len(t) for t in per_interval)
+    active_intervals = sum(1 for t in per_interval if len(t) > 0)
 
     stats_text = (
         f"  Portfolio Summary\n"
@@ -350,8 +328,8 @@ def plot_portfolio_overview(data, result):
         f"  Win rate:        {metrics['win_rate']*100:.1f}%\n"
         f"  ────────────────────────\n"
         f"  Total trades:    {total_trades}\n"
-        f"  Active days:     {active_days}/{len(d)}\n"
-        f"  Avg trades/day:  {metrics['avg_daily_trades']:.1f}\n"
+        f"  Active 15m bars: {active_intervals}/{len(d)}\n"
+        f"  Avg trades/bar:  {metrics['avg_daily_trades']:.2f}\n"  # Variable remains daily_trades for backward compat
         f"  Stocks traded:   {int(n_traded)}/{n_tickers}\n"
         f"  Build time:      {result['build_time']:.1f}s"
     )
@@ -374,14 +352,14 @@ def plot_portfolio_overview(data, result):
 def plot_stock_heatmap(data, result):
     """Show a heatmap of per-stock total returns and trade counts."""
     tickers = data["tradeable_tickers"]
-    per_day = result["per_day_trades"]
+    per_interval = result["per_interval_trades"]
 
     n_tickers = len(tickers)
     stock_total_ret = np.zeros(n_tickers)
     stock_trade_count = np.zeros(n_tickers, dtype=int)
     stock_win_count = np.zeros(n_tickers, dtype=int)
 
-    for trades in per_day:
+    for trades in per_interval:
         for t in trades:
             j = tickers.index(t["ticker"]) if t["ticker"] in tickers else -1
             if j >= 0:
@@ -444,29 +422,34 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize day-trading backtest results")
     parser.add_argument("ticker", nargs="?", default=None,
                         help="Ticker to visualize (omit for portfolio overview)")
-    parser.add_argument("--slice", type=int, default=-1,
-                        help="Which 6-month slice to use (0-indexed, -1 = last)")
     parser.add_argument("--all-stocks", action="store_true",
                         help="Show per-stock heatmap")
     args = parser.parse_args()
 
-    from train import build_strategy, generate_orders
+    from opt import build_strategy, generate_orders
 
     print("Loading data...")
     data = load_data(device="cpu")
     dates = data["dates"]
-    boundaries = get_slice_boundaries(dates)
+    n_periods = len(dates)
 
-    # Select slice
-    num_slices = min(NUM_SLICES, len(boundaries) - 2)
-    k = args.slice if args.slice >= 0 else num_slices - 1
-    k = min(k, num_slices - 1)
+    if n_periods < 100:
+        print("ERROR: Not enough data points to evaluate.")
+        sys.exit(1)
 
-    train_end = boundaries[k + 1]
-    test_start = boundaries[k + 1]
-    test_end = boundaries[k + 2] if k + 2 < len(boundaries) else len(dates)
+    # Split: Find the index roughly 30 days from the start date (matches prepare.py)
+    start_date = dates[0]
+    split_date = start_date + datetime.timedelta(days=30)
+    split_idx = _find_date_idx(dates, split_date)
 
-    print(f"Running backtest (slice {k}/{num_slices-1})...")
+    if split_idx <= 0 or split_idx >= n_periods:
+        split_idx = n_periods // 2
+
+    train_end = split_idx
+    test_start = split_idx
+    test_end = n_periods
+
+    print("Running backtest (evaluating out-of-sample window)...")
     result = run_backtest(
         build_strategy, generate_orders, data,
         train_end_idx=train_end,
