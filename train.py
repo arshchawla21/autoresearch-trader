@@ -1,9 +1,9 @@
 """
-v26-multi-lookback: Cross-sectional L/S MR with blended multi-lookback signal.
+v27-volscaled-stops: Cross-sectional L/S MR with per-stock volatility-scaled stops.
 
-Instead of a single lookback, blend 1-bar and 5-bar returns for ranking.
-Short-term (1-bar) captures immediate overreaction.
-Medium-term (5-bar) captures sustained drift that's likely to revert.
+Instead of fixed 0.5% SL/TP, scale stops to each stock's recent volatility.
+Set SL/TP at 1.5x the stock's median bar range — so stops are proportional
+to how much that stock typically moves in 15 minutes.
 """
 
 import time
@@ -13,10 +13,10 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
-SL_PCT = 0.005
-TP_PCT = 0.005
+STOP_MULT = 1.5   # stops at 1.5x recent median bar range
 N_LONG = 2
 N_SHORT = 2
+LOOKBACK = 5
 
 
 def build_strategy(train_data):
@@ -27,7 +27,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < 6:
+    if bar_idx < LOOKBACK + 11:
         return []
 
     tickers = strategy["tickers"]
@@ -39,26 +39,24 @@ def generate_orders(strategy, data, bar_idx):
 
     opens = ohlcv_np[bar_idx, tidx_np, O]
     closes = ohlcv_np[:bar_idx, tidx_np, C]
+    highs = ohlcv_np[:bar_idx, tidx_np, H]
+    lows = ohlcv_np[:bar_idx, tidx_np, L]
 
-    # Blend 1-bar and 5-bar returns (equal weight)
-    ret1 = (closes[-1] - closes[-2]) / np.maximum(np.abs(closes[-2]), 1e-8)
-    ret5 = (closes[-1] - closes[-6]) / np.maximum(np.abs(closes[-6]), 1e-8)
+    ret = (closes[-1] - closes[-1 - LOOKBACK]) / np.maximum(np.abs(closes[-1 - LOOKBACK]), 1e-8)
 
-    # Normalize each to z-scores before blending (different scales)
-    def zscore(x):
-        m = np.nanmean(x)
-        s = np.nanstd(x)
-        return (x - m) / max(s, 1e-8)
+    # Per-stock median bar range over last 10 bars
+    ranges = (highs[-10:] - lows[-10:]) / np.maximum(np.abs(closes[-11:-1]), 1e-8)
+    med_range = np.median(ranges, axis=0)
+    stop_pct = med_range * STOP_MULT
+    stop_pct = np.clip(stop_pct, 0.001, 0.02)  # floor/cap at 0.1% to 2%
 
-    signal = zscore(ret1) + zscore(ret5)
-
-    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(signal)
+    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
     valid_idx = np.where(valid_mask)[0]
     if len(valid_idx) < N_LONG + N_SHORT:
         return []
 
-    valid_signal = signal[valid_idx]
-    sorted_indices = np.argsort(valid_signal)
+    valid_rets = ret[valid_idx]
+    sorted_indices = np.argsort(valid_rets)
 
     long_picks = valid_idx[sorted_indices[:N_LONG]]
     short_picks = valid_idx[sorted_indices[-N_SHORT:]]
@@ -68,22 +66,24 @@ def generate_orders(strategy, data, bar_idx):
     orders = []
     for idx in long_picks:
         op = float(opens[idx])
+        sp = float(stop_pct[idx])
         orders.append({
             "ticker": tickers[idx],
             "direction": "long",
             "weight": w,
-            "stop_loss": op * (1 - SL_PCT),
-            "take_profit": op * (1 + TP_PCT),
+            "stop_loss": op * (1 - sp),
+            "take_profit": op * (1 + sp),
         })
 
     for idx in short_picks:
         op = float(opens[idx])
+        sp = float(stop_pct[idx])
         orders.append({
             "ticker": tickers[idx],
             "direction": "short",
             "weight": w,
-            "stop_loss": op * (1 + SL_PCT),
-            "take_profit": op * (1 - TP_PCT),
+            "stop_loss": op * (1 + sp),
+            "take_profit": op * (1 - sp),
         })
 
     return orders
