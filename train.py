@@ -1,5 +1,5 @@
 """
-v22-cross-sectional-ls: Pure cross-sectional long/short mean-reversion.
+v23-xsect-optimized: Cross-sectional L/S MR with optimized params.
 
 Simple but proven approach:
 - Each bar, rank all 28 stocks by their recent return
@@ -19,11 +19,11 @@ from prepare import O, H, L, C, V, evaluate
 t_start = time.time()
 
 # Trade parameters
-SL_PCT = 0.004   # 0.4% stop
-TP_PCT = 0.004   # 0.4% take profit
-N_LONG = 3       # number of stocks to go long
-N_SHORT = 3      # number of stocks to go short
-LOOKBACK = 3     # bars of return to fade
+SL_PCT = 0.005   # 0.5% stop
+TP_PCT = 0.005   # 0.5% take profit
+N_LONG = 2       # number of stocks to go long
+N_SHORT = 2      # number of stocks to go short
+LOOKBACK = 5     # bars of return to fade
 
 
 def build_strategy(train_data):
