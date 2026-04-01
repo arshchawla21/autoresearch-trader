@@ -1,8 +1,8 @@
 """
-v5-rsi-meanrev: RSI-based mean-reversion. Trade only at extremes.
+v6-concentrated-meanrev: Single stock, 2-bar lookback, full weight.
 
-Hypothesis: RSI identifies overbought/oversold better than raw momentum.
-Only trade when RSI < 30 (buy) or RSI > 70 (sell). Wider TP for bigger wins.
+Hypothesis: concentrating on the single most extreme mover with a faster
+2-bar lookback captures the sharpest mean-reversion opportunities.
 """
 
 import os
@@ -14,38 +14,14 @@ from prepare import O, H, L, C, V, evaluate
 t_start = time.time()
 
 
-def compute_rsi(closes, period=14):
-    """Compute RSI for each stock. closes shape: (T, N)"""
-    T, N = closes.shape
-    rsi = np.full((T, N), 50.0)  # neutral default
-
-    for t in range(period + 1, T):
-        window = closes[t - period:t + 1]
-        deltas = np.diff(window, axis=0)
-        gains = np.maximum(deltas, 0)
-        losses = np.maximum(-deltas, 0)
-
-        avg_gain = np.mean(gains, axis=0)
-        avg_loss = np.mean(losses, axis=0)
-
-        rs = avg_gain / np.maximum(avg_loss, 1e-10)
-        rsi[t] = 100 - 100 / (1 + rs)
-
-    return rsi
-
-
 def build_strategy(train_data):
-    """Compute ATR and precompute RSI on training data."""
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
-
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
     lows = ohlcv[:, tidx, L]
-
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
-
     return {
         "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
@@ -54,9 +30,8 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    """Trade based on RSI extremes."""
-    rsi_period = 14
-    if bar_idx < rsi_period + 2:
+    lookback = 2
+    if bar_idx < lookback + 1:
         return []
 
     tickers = strategy["tickers"]
@@ -64,64 +39,46 @@ def generate_orders(strategy, data, bar_idx):
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
 
-    # Compute RSI on recent history
-    closes = ohlcv[bar_idx - rsi_period - 1:bar_idx, tidx, C].numpy()
-    deltas = np.diff(closes, axis=0)
-    gains = np.maximum(deltas, 0)
-    losses = np.maximum(-deltas, 0)
-    avg_gain = np.mean(gains, axis=0)
-    avg_loss = np.mean(losses, axis=0)
-    rs = avg_gain / np.maximum(avg_loss, 1e-10)
-    rsi = 100 - 100 / (1 + rs)
-
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    valid = np.where((opens > 0) & ~np.isnan(opens))[0]
+    past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
+    current_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    momentum = (current_close - past_close) / np.maximum(past_close, 1e-8)
+
+    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
     if len(valid) == 0:
         return []
 
-    orders = []
-    candidates = []
+    # Pick the single most extreme mover
+    abs_mom = np.abs(momentum[valid])
+    best = valid[np.argmax(abs_mom)]
 
-    for idx in valid:
-        r = float(rsi[idx])
-        if r < 30:
-            candidates.append((idx, "long", 30 - r))  # more extreme = stronger signal
-        elif r > 70:
-            candidates.append((idx, "short", r - 70))
+    ticker = tickers[best]
+    op = float(opens[best])
+    mom = float(momentum[best])
+    atr = float(avg_atr[best])
 
-    if not candidates:
+    if abs(mom) < 0.002:
         return []
 
-    # Sort by signal strength, take top 3
-    candidates.sort(key=lambda x: -x[2])
-    top = candidates[:3]
-    weight = 1.0 / len(top)
+    direction = "short" if mom > 0 else "long"
 
-    for idx, direction, strength in top:
-        ticker = tickers[idx]
-        op = float(opens[idx])
-        atr = float(avg_atr[idx])
+    sl_dist = max(atr * 1.5, 0.002) * op
+    tp_dist = max(atr * 2.0, 0.003) * op
 
-        # Wider TP: 2.5x ATR, SL: 1.5x ATR
-        sl_dist = max(atr * 1.5, 0.002) * op
-        tp_dist = max(atr * 2.5, 0.004) * op
+    if direction == "long":
+        sl = op - sl_dist
+        tp = op + tp_dist
+    else:
+        sl = op + sl_dist
+        tp = op - tp_dist
 
-        if direction == "long":
-            sl = op - sl_dist
-            tp = op + tp_dist
-        else:
-            sl = op + sl_dist
-            tp = op - tp_dist
-
-        orders.append({
-            "ticker": ticker,
-            "direction": direction,
-            "weight": weight,
-            "stop_loss": sl,
-            "take_profit": tp,
-        })
-
-    return orders
+    return [{
+        "ticker": ticker,
+        "direction": direction,
+        "weight": 1.0,
+        "stop_loss": sl,
+        "take_profit": tp,
+    }]
 
 
 if __name__ == "__main__":

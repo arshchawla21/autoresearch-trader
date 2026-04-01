@@ -4,3 +4,4 @@ v2-momentum	-2.7919	-0.0362	-0.0712	0.455	3.00	0.0	0.0	0	4-bar momentum, top 3 s
 v3-mean-reversion	1.3250	0.0161	-0.0467	0.537	3.00	0.0	0.0	0	Fade 4-bar momentum, ATR stops
 v4-meanrev-opt	1.2930	0.0126	-0.0345	0.497	4.63	0.0	0.0	0	VIX filter, 5 stocks, tighter TP - slightly worse
 v5-rsi-meanrev	-0.4921	-0.0067	-0.0553	0.475	2.67	0.0	0.0	0	RSI extremes (30/70) - worse than raw momentum fade
+v6-concentrated	8.4104	0.1741	-0.0357	0.539	0.98	0.0	0.0	0	Single most extreme stock, 2-bar lookback, full weight
