@@ -1,9 +1,12 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v54: v48 with BatchNorm instead of Dropout + lower LR + more epochs.
-BatchNorm can improve regression quality by normalizing activations.
-Also: lr=5e-4 (half of v48) with 50% more epochs for smoother convergence.
+v55: Dual-model combo: Huber regression + BCE classification.
+Train two independent models with different loss functions:
+- Model A: Huber regression on clipped returns (captures magnitude)
+- Model B: BCE classification on direction (captures probability)
+At inference, combine: rank by 0.5*normalized_return_pred + 0.5*probability.
+This fuses two complementary signals — magnitude and direction.
 
 Usage: uv run train.py
 """
@@ -28,11 +31,11 @@ class Net(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_features, 128),
-            nn.BatchNorm1d(128),
             nn.ReLU(),
+            nn.Dropout(0.15),
             nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
             nn.ReLU(),
+            nn.Dropout(0.15),
             nn.Linear(64, 1),
         )
 
@@ -107,14 +110,39 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     return features, atr_pct
 
 
-def simulate_day(pred_ret, today_open, today_high, today_low, today_close,
+def train_model(X_norm, y, n_features, criterion, seed=42):
+    torch.manual_seed(seed)
+    model = Net(n_features).to(dev)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    X_train = X_norm.to(dev)
+    y_train = y.to(dev)
+
+    batch_size = 2048
+    n_samples = X_train.shape[0]
+    n_epochs = min(60, max(10, 400 * 1000 // n_samples))
+
+    model.train()
+    for _ in range(n_epochs):
+        perm = torch.randperm(n_samples, device=dev)
+        for start in range(0, n_samples, batch_size):
+            idx = perm[start:min(start + batch_size, n_samples)]
+            pred = model(X_train[idx])
+            loss = criterion(pred, y_train[idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    model.eval()
+    return model
+
+
+def simulate_day(scores, today_open, today_high, today_low, today_close,
                  atr_pct, n_tickers, sl_mult, tp_mult):
     scored = []
     for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0:
             continue
-        scored.append((i, float(pred_ret[i]), op, float(atr_pct[i])))
+        scored.append((i, float(scores[i]), op, float(atr_pct[i])))
 
     if len(scored) < 10:
         return 0.0
@@ -161,49 +189,37 @@ def build_strategy(train_data):
     closes = ohlcv[:, tradeable_idx, C]
 
     min_day = 21
-    X_list, y_list = [], []
+    X_list, y_ret_list, y_dir_list = [], [], []
     for d in range(min_day, D):
         feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        intraday = intraday.clamp(-0.10, 0.10)
         X_list.append(feats)
-        y_list.append(intraday)
+        y_ret_list.append(intraday.clamp(-0.10, 0.10))
+        y_dir_list.append((intraday > 0).float())
 
     X = torch.cat(X_list, dim=0)
-    y = torch.cat(y_list, dim=0)
+    y_ret = torch.cat(y_ret_list, dim=0)
+    y_dir = torch.cat(y_dir_list, dim=0)
 
     feat_mean = X.mean(dim=0)
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
-    y_mean = y.mean()
-    y_std = y.std().clamp(min=1e-8)
-    y_norm = (y - y_mean) / y_std
+    y_ret_mean = y_ret.mean()
+    y_ret_std = y_ret.std().clamp(min=1e-8)
+    y_ret_norm = (y_ret - y_ret_mean) / y_ret_std
 
     n_features = X_norm.shape[1]
-    model = Net(n_features).to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
-    criterion = nn.HuberLoss(delta=1.0)
-    X_train = X_norm.to(dev)
-    y_train = y_norm.to(dev)
 
-    batch_size = 2048
-    n_samples = X_train.shape[0]
-    n_epochs = min(90, max(15, 600 * 1000 // n_samples))
+    # Train regression model (Huber)
+    reg_model = train_model(X_norm, y_ret_norm, n_features,
+                            nn.HuberLoss(delta=1.0), seed=42)
 
-    model.train()
-    for _ in range(n_epochs):
-        perm = torch.randperm(n_samples, device=dev)
-        for start in range(0, n_samples, batch_size):
-            idx = perm[start:min(start + batch_size, n_samples)]
-            pred = model(X_train[idx])
-            loss = criterion(pred, y_train[idx])
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-    model.eval()
+    # Train classification model (BCE)
+    cls_model = train_model(X_norm, y_dir, n_features,
+                            nn.BCEWithLogitsLoss(), seed=123)
 
-    # Calibrate stops
+    # Calibrate stops using combined score
     N = len(tradeable_idx)
     cal_start = max(min_day, D - 125)
     best_sharpe = -999
@@ -216,11 +232,16 @@ def build_strategy(train_data):
                 feats, atr = compute_features(ohlcv, tradeable_idx, all_tickers, d)
                 feats_n = (feats - feat_mean) / feat_std
                 with torch.no_grad():
-                    pn = model(feats_n.to(dev)).cpu()
-                    pr = pn * y_std + y_mean
+                    reg_pred = reg_model(feats_n.to(dev)).cpu()
+                    cls_logits = cls_model(feats_n.to(dev)).cpu()
+                    cls_prob = torch.sigmoid(cls_logits)
+
+                # Normalize reg predictions to [0,1] range for combination
+                reg_norm = (reg_pred - reg_pred.min()) / (reg_pred.max() - reg_pred.min() + 1e-8)
+                combined = 0.5 * reg_norm + 0.5 * cls_prob
 
                 ret = simulate_day(
-                    pr,
+                    combined,
                     ohlcv[d, tradeable_idx, O],
                     ohlcv[d, tradeable_idx, H],
                     ohlcv[d, tradeable_idx, L],
@@ -242,11 +263,12 @@ def build_strategy(train_data):
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "all_tickers": all_tickers,
-        "model": model,
+        "reg_model": reg_model,
+        "cls_model": cls_model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
-        "y_mean": float(y_mean),
-        "y_std": float(y_std),
+        "y_ret_mean": float(y_ret_mean),
+        "y_ret_std": float(y_ret_std),
         "sl_mult": best_sl,
         "tp_mult": best_tp,
     }
@@ -257,11 +279,10 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     all_tickers = strategy["all_tickers"]
-    model = strategy["model"]
+    reg_model = strategy["reg_model"]
+    cls_model = strategy["cls_model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
-    y_mean = strategy["y_mean"]
-    y_std = strategy["y_std"]
     sl_mult = strategy["sl_mult"]
     tp_mult = strategy["tp_mult"]
     n_tickers = len(tickers)
@@ -276,17 +297,22 @@ def generate_orders(strategy, data, day_idx):
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
-        pred_norm = model(feats_norm.to(dev)).cpu()
-        pred_ret = pred_norm * y_std + y_mean
+        reg_pred = reg_model(feats_norm.to(dev)).cpu()
+        cls_logits = cls_model(feats_norm.to(dev)).cpu()
+        cls_prob = torch.sigmoid(cls_logits)
+
+    # Normalize regression to [0,1] for combination with probability
+    reg_norm = (reg_pred - reg_pred.min()) / (reg_pred.max() - reg_pred.min() + 1e-8)
+    combined = 0.5 * reg_norm + 0.5 * cls_prob
 
     scored = []
     for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0 or np.isnan(op):
             continue
-        r = float(pred_ret[i])
+        s = float(combined[i])
         ap = float(atr_pct[i])
-        scored.append((i, r, op, ap))
+        scored.append((i, s, op, ap))
 
     if len(scored) < 10:
         return []

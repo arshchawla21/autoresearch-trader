@@ -48,3 +48,4 @@ v51-linear-huber-opt	0.4786	0.97	-4.02	51.2	20.0	0.0	30.7	24.6	Linear model + Hu
 v52-rank-targets-opt	0.8194	2.60	-3.42	52.2	20.0	0.0	33.9	26.9	Cross-sectional rank targets + opt stops. Highest return (2.60%) but lower Sharpe than v48.
 v53-mse-opt-stops	0.6371	1.67	-3.30	52.3	20.0	0.0	33.7	26.9	MSE loss instead of Huber. Worse — Huber's robustness helps even with clipped targets.
 v54-batchnorm-lowlr	0.3782	1.13	-3.65	50.9	20.0	0.0	38.0	26.9	BatchNorm + lower LR. Much worse — BN stats go stale in walk-forward. Dropout wins.
+v55-dual-model-combo	0.5633	1.64	-3.89	51.9	20.0	0.0	41.8	27.0	Huber+BCE dual model combined at inference. Averaging always dilutes — single Huber model best.
