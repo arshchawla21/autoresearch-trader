@@ -1,9 +1,9 @@
 """
-v21-multi-stock: Trade top 5 movers every bar with equal weight.
+v22-scalper: Ultra-tight TP (0.5x ATR) for rapid scalping.
 
-Hypothesis: with zero fees, diversifying across multiple mean-reversion
-candidates per bar reduces single-stock risk and smooths returns.
-More trades per bar = lower variance = higher Sharpe.
+Hypothesis: with zero fees, we can take even smaller profits per trade.
+Tighter TP = higher hit rate = smoother equity curve = higher Sharpe.
+The trade closes at TP more often instead of getting stopped or held to close.
 """
 
 import os
@@ -48,41 +48,33 @@ def generate_orders(strategy, data, bar_idx):
     if len(valid) == 0:
         return []
 
-    # Top 5 by absolute momentum
-    abs_mom = np.abs(momentum[valid])
-    top_k = min(5, len(valid))
-    top_indices = valid[np.argsort(-abs_mom)[:top_k]]
+    best = valid[np.argmax(np.abs(momentum[valid]))]
 
-    weight = 1.0 / top_k
-    orders = []
+    ticker = tickers[best]
+    op = float(opens[best])
+    mom = float(momentum[best])
+    atr = float(avg_atr[best])
 
-    for idx in top_indices:
-        ticker = tickers[idx]
-        op = float(opens[idx])
-        mom = float(momentum[idx])
-        atr = float(avg_atr[idx])
+    direction = "short" if mom > 0 else "long"
 
-        direction = "short" if mom > 0 else "long"
+    # Ultra-tight TP, reasonable SL
+    sl_dist = max(atr * 0.7, 0.001) * op
+    tp_dist = max(atr * 0.5, 0.0008) * op
 
-        sl_dist = max(atr * 0.7, 0.001) * op
-        tp_dist = max(atr * 1.0, 0.0015) * op
+    if direction == "long":
+        sl = op - sl_dist
+        tp = op + tp_dist
+    else:
+        sl = op + sl_dist
+        tp = op - tp_dist
 
-        if direction == "long":
-            sl = op - sl_dist
-            tp = op + tp_dist
-        else:
-            sl = op + sl_dist
-            tp = op - tp_dist
-
-        orders.append({
-            "ticker": ticker,
-            "direction": direction,
-            "weight": weight,
-            "stop_loss": sl,
-            "take_profit": tp,
-        })
-
-    return orders
+    return [{
+        "ticker": ticker,
+        "direction": direction,
+        "weight": 1.0,
+        "stop_loss": sl,
+        "take_profit": tp,
+    }]
 
 
 if __name__ == "__main__":
