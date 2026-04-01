@@ -1,7 +1,7 @@
 """
-v8-tight-sl: Tighter SL (1.0x ATR), wider TP (3.0x ATR).
+v9-tighter-sl: Even tighter SL (0.7x ATR), wider TP (4.0x ATR).
 
-Hypothesis: tighter stop-loss cuts losses faster, wider TP lets winners run.
+Hypothesis: pushing the asymmetry further improves risk-reward.
 """
 
 import os
@@ -61,8 +61,8 @@ def generate_orders(strategy, data, bar_idx):
 
     direction = "short" if mom > 0 else "long"
 
-    sl_dist = max(atr * 1.0, 0.0015) * op
-    tp_dist = max(atr * 3.0, 0.004) * op
+    sl_dist = max(atr * 0.7, 0.001) * op
+    tp_dist = max(atr * 4.0, 0.005) * op
 
     if direction == "long":
         sl = op - sl_dist
