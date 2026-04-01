@@ -10,3 +10,4 @@ v8-ls-1bar	11.3930	0.0086	-0.0034	0.582	28.00	0.0	0.0	0	L/S 1-bar lookback - sli
 v9-wide-tp	4.7738	0.0234	-0.0194	0.490	1.00	0.0	0.0	0	Concentrated 4x ATR TP
 v10-no-stop	5.7809	0.0319	-0.0269	0.529	1.00	0.0	0.0	0	No SL, tight TP - highest return so far
 v11-ml-calibrated	5.3230	0.0062	-0.0075	0.549	10.00	2.6	2.6	0	NN direction pred, sym stops 50% bar range, 54.9% WR
+v12-ml-aggressive	-9.6823	-0.0156	-0.0219	0.438	5.00	4.1	4.1	0	Bigger model, more features - badly overfit (89% train, 44% eval)
