@@ -1,11 +1,11 @@
 """
-v11-volume-filter: Fade low-volume moves, avoid high-volume moves.
+v12-sector-divergence: Trade stock-vs-sector divergence.
 
-Hypothesis: price moves on low relative volume lack conviction and are more
-likely to revert. High-volume moves signal real information and should not
-be faded. This is a structural improvement with clear economic rationale.
+Hypothesis: when a stock moves differently from its sector ETF over the last
+2 bars, it tends to revert toward the sector. This is pairs-trading logic
+with economic rationale — sector correlation is mean-reverting.
 
-Uses v9 stops (0.7x ATR SL, 4.0x ATR TP) as the known-good baseline.
+Still uses v9 stops (0.7x/4.0x ATR).
 """
 
 import os
@@ -16,82 +16,102 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
+# Stock -> sector ETF mapping
+SECTOR_MAP = {
+    "AAPL": "XLK", "MSFT": "XLK", "GOOGL": "XLK", "META": "XLK", "NVDA": "XLK",
+    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY",
+    "JPM": "XLF", "V": "XLF", "MA": "XLF", "BAC": "XLF",
+    "JNJ": "XLV", "UNH": "XLV",
+    "PG": "XLP",
+}
+
 
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
+    tickers = train_data["tradeable_tickers"]
 
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
     lows = ohlcv[:, tidx, L]
-    volumes = ohlcv[:, tidx, V]
-
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
 
-    # Compute median volume per stock for relative volume comparison
-    median_vol = np.nanmedian(volumes, axis=0)
+    # Build ticker -> index in tradeable array
+    ticker_to_tidx = {t: i for i, t in enumerate(tickers)}
 
     return {
-        "tickers": train_data["tradeable_tickers"],
+        "tickers": tickers,
         "tradeable_idx": train_data["tradeable_indices"],
         "avg_atr_pct": avg_atr_pct,
-        "median_vol": median_vol,
+        "ticker_to_tidx": ticker_to_tidx,
     }
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < 3:
+    lookback = 2
+    if bar_idx < lookback + 1:
         return []
 
     tickers = strategy["tickers"]
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
-    median_vol = strategy["median_vol"]
+    t2i = strategy["ticker_to_tidx"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
+    past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
+    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    returns = (curr_close - past_close) / np.maximum(past_close, 1e-8)
 
-    # 1-bar momentum (open-to-close of previous bar)
-    prev_open = ohlcv[bar_idx - 1, tidx, O].numpy()
-    prev_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    prev_vol = ohlcv[bar_idx - 1, tidx, V].numpy()
-    momentum = (prev_close - prev_open) / np.maximum(prev_open, 1e-8)
+    # Compute divergence: stock return minus sector ETF return
+    best_score = 0
+    best_idx = None
+    best_direction = None
 
-    # Relative volume: how does last bar's volume compare to median
-    rel_vol = prev_vol / np.maximum(median_vol, 1e-8)
+    for stock, sector_etf in SECTOR_MAP.items():
+        if stock not in t2i or sector_etf not in t2i:
+            continue
+        si = t2i[stock]
+        ei = t2i[sector_etf]
 
-    valid = np.where(
-        (opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum) & ~np.isnan(rel_vol)
-    )[0]
-    if len(valid) == 0:
+        if np.isnan(returns[si]) or np.isnan(returns[ei]):
+            continue
+        if opens[si] <= 0 or np.isnan(opens[si]):
+            continue
+
+        divergence = returns[si] - returns[ei]
+        score = abs(divergence)
+
+        if score > best_score:
+            best_score = score
+            best_idx = si
+            # Fade the divergence: if stock outperformed sector, short it
+            best_direction = "short" if divergence > 0 else "long"
+
+    if best_idx is None or best_score < 0.001:
         return []
 
-    # Score: high absolute momentum + low relative volume = best fade candidate
-    # Penalize high-volume moves (they're more likely real)
-    scores = np.abs(momentum[valid]) / np.maximum(rel_vol[valid], 0.1)
+    # Also check the plain mean-reversion signal as fallback
+    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(returns))[0]
+    abs_ret = np.abs(returns[valid])
+    plain_best = valid[np.argmax(abs_ret)]
+    plain_score = float(abs_ret[np.argmax(abs_ret)])
 
-    best = valid[np.argmax(scores)]
+    # Use whichever signal is stronger
+    if plain_score > best_score * 1.5:
+        best_idx = plain_best
+        mom = float(returns[plain_best])
+        best_direction = "short" if mom > 0 else "long"
 
-    ticker = tickers[best]
-    op = float(opens[best])
-    mom = float(momentum[best])
-    atr = float(avg_atr[best])
-    rv = float(rel_vol[best])
-
-    if abs(mom) < 0.0005:
-        return []
-
-    # Skip if volume was very high — this move may be real news
-    if rv > 2.0:
-        return []
-
-    direction = "short" if mom > 0 else "long"
+    ticker = tickers[best_idx]
+    op = float(opens[best_idx])
+    atr = float(avg_atr[best_idx])
 
     sl_dist = max(atr * 0.7, 0.001) * op
     tp_dist = max(atr * 4.0, 0.005) * op
 
-    if direction == "long":
+    if best_direction == "long":
         sl = op - sl_dist
         tp = op + tp_dist
     else:
@@ -100,7 +120,7 @@ def generate_orders(strategy, data, bar_idx):
 
     return [{
         "ticker": ticker,
-        "direction": direction,
+        "direction": best_direction,
         "weight": 1.0,
         "stop_loss": sl,
         "take_profit": tp,
