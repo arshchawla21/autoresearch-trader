@@ -1,2 +1,5 @@
 tag	sharpe_ratio	total_return	max_drawdown	win_rate	avg_daily_trades	build_seconds	total_seconds	peak_vram_mb	description
 v19-selective-ml	-2.4506	-0.0071	-0.0171	0.242	1.20	1.5	1.5	0	1% SL/TP ML selective - base rate ~50%, model overfits
+v20-ml-aligned	-12.5106	-0.0352	-0.0403	0.451	2.93	1.2	1.5	0	0.5% SL/TP ML with 1-bar training alignment, still overfits badly
+v21-ml-nosignal	0.0000	0.0000	0.0000	0.000	0.00	1.2	1.2	0	ML with strong reg finds no signal, zero trades
+v22-xsect-ls	2.5723	0.0043	-0.0084	0.575	6.00	0.0	0.0	0	Cross-sectional L/S MR lb=3 n=3 sl/tp=0.4%
