@@ -1,10 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v34: v30 base (0.3 SPY core) with tighter satellite threshold (0.60).
-v30 achieved >50% win rate but only 0.40 Sharpe. Higher satellite
-threshold should improve Sharpe via fewer but better satellite picks.
-Core maintains win rate >50%.
+v35: v30 with slightly looser satellites (0.56) for more alpha.
+v30 is the best balanced strategy (Sharpe=0.40, WR=52.4%).
+Try slightly more satellite trades for additional alpha.
 
 Usage: uv run train.py
 """
@@ -210,7 +209,7 @@ def generate_orders(strategy, data, day_idx):
         p = float(probs[i])
         ap = float(atr_pct[i])
 
-        if p > 0.60:  # Higher threshold for better quality satellites
+        if p > 0.56:  # Slightly looser for more satellite alpha
             candidates.append((i, p, op, ap))
 
     if candidates:
