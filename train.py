@@ -1,11 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v26: Best-of-breed synthesis.
+v27: Loosened v26 for more activity.
 - Long-only (v24: most consistent, rides market drift)
-- Cash in downtrends (SPY_mom_20 < -2%: stay flat, avoid bear losses)
-- v11's exact features, architecture, thresholds (proven Sharpe=0.45)
-- v11's stop/target (1.5x ATR / 2.0x ATR)
+- Cash only in SEVERE downtrends (SPY_mom_20 < -4%)
+- Lower threshold (0.55) for more trades
+- Top 6 positions instead of 5
 
 Usage: uv run train.py
 """
@@ -160,8 +160,8 @@ def generate_orders(strategy, data, day_idx):
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
 
-    # BEAR MARKET FILTER: stay flat when SPY is in clear downtrend
-    if spy_mom < -0.02:
+    # BEAR MARKET FILTER: stay flat only in severe downtrend
+    if spy_mom < -0.04:
         return []
 
     feats_norm = (feats - feat_mean) / feat_std
@@ -172,8 +172,8 @@ def generate_orders(strategy, data, day_idx):
 
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    # LONG ONLY with v11's proven threshold
-    long_thresh = 0.58
+    # LONG ONLY with lowered threshold for more activity
+    long_thresh = 0.55
 
     candidates = []
     for i in range(n_tickers):
@@ -189,9 +189,9 @@ def generate_orders(strategy, data, day_idx):
     if not candidates:
         return []
 
-    # Top 5 by confidence
+    # Top 6 by confidence
     candidates.sort(key=lambda x: x[1], reverse=True)
-    candidates = candidates[:5]
+    candidates = candidates[:6]
 
     weight_each = vol_scale / len(candidates)
     stop_m = 1.5
