@@ -1,9 +1,7 @@
 """
-v7-ls-momentum-weighted: L/S portfolio, weight proportional to signal strength.
+v8-ls-1bar: Equal-weight L/S, 1-bar lookback (open-to-close of prev bar).
 
-Hypothesis: stocks with stronger momentum deserve larger positions.
-Weighting by |momentum| concentrates capital on the strongest signals
-while maintaining market neutrality.
+Hypothesis: faster 1-bar signal captures more immediate reversions.
 """
 
 import time
@@ -29,7 +27,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < 3:
+    if bar_idx < 2:
         return []
 
     tickers = strategy["tickers"]
@@ -38,48 +36,41 @@ def generate_orders(strategy, data, bar_idx):
     avg_atr = strategy["avg_atr_pct"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    past_close = ohlcv[bar_idx - 2, tidx, C].numpy()
-    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
+    prev_open = ohlcv[bar_idx - 1, tidx, O].numpy()
+    prev_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    momentum = (prev_close - prev_open) / np.maximum(prev_open, 1e-8)
 
     valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
     if len(valid) < 4:
         return []
 
-    # Split into longs (negative momentum) and shorts (positive momentum)
-    mom_valid = momentum[valid]
-    longs = valid[mom_valid < 0]
-    shorts = valid[mom_valid > 0]
+    ranked = valid[np.argsort(momentum[valid])]
+    n = len(ranked)
+    half = n // 2
+    longs = ranked[:half]
+    shorts = ranked[half:]
 
-    if len(longs) == 0 or len(shorts) == 0:
-        return []
-
-    # Weight by absolute momentum within each side, then split 50/50
-    long_abs = np.abs(momentum[longs])
-    short_abs = np.abs(momentum[shorts])
-    long_weights = 0.5 * long_abs / long_abs.sum()
-    short_weights = 0.5 * short_abs / short_abs.sum()
+    total_positions = len(longs) + len(shorts)
+    w = 1.0 / total_positions
 
     orders = []
-    for i, idx in enumerate(longs):
+    for idx in longs:
         op = float(opens[idx])
         atr = float(avg_atr[idx])
         sl_dist = max(atr * 0.7, 0.001) * op
         tp_dist = max(atr * 1.0, 0.0015) * op
         orders.append({
-            "ticker": tickers[idx], "direction": "long",
-            "weight": float(long_weights[i]),
+            "ticker": tickers[idx], "direction": "long", "weight": w,
             "stop_loss": op - sl_dist, "take_profit": op + tp_dist,
         })
 
-    for i, idx in enumerate(shorts):
+    for idx in shorts:
         op = float(opens[idx])
         atr = float(avg_atr[idx])
         sl_dist = max(atr * 0.7, 0.001) * op
         tp_dist = max(atr * 1.0, 0.0015) * op
         orders.append({
-            "ticker": tickers[idx], "direction": "short",
-            "weight": float(short_weights[i]),
+            "ticker": tickers[idx], "direction": "short", "weight": w,
             "stop_loss": op + sl_dist, "take_profit": op - tp_dist,
         })
 
