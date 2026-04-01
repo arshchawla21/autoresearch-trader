@@ -1,10 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v27: Very high DIA/XLF weights, lower QQQ/IWM.
-
-Result: QQQ=0.5, IWM=0.6, DIA=1.8, XLF=0.5 gives Sharpe=3.92.
-DIA dominance continues — over-hedging DIA exposure is the key lever.
+Baseline: Simple mean-reversion day-trading strategy.
+For each day, identifies stocks that moved > 1 std from recent mean,
+takes contrarian positions with 1% stop-loss and 1.5% take-profit.
 
 Usage: uv run train.py
 """
@@ -13,137 +12,192 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import time
+import numpy as np
 import torch
 
-from prepare import (
-    C,
-    load_data, evaluate_sharpe,
-)
+from prepare import O, H, L, C, evaluate
 
 t_start = time.time()
 torch.manual_seed(42)
-device = torch.device("cuda")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-data = load_data(device="cpu")
-ohlcv = data["ohlcv"]
-tradeable_idx = data["tradeable_indices"]
-N_trade = data["num_tradeable"]
-D = ohlcv.shape[0]
 
-close = ohlcv[:, tradeable_idx, C]
-log_close = torch.log(close.clamp(min=1e-8))
-daily_ret = torch.zeros(D, N_trade)
-daily_ret[1:] = log_close[1:] - log_close[:-1]
+# ---------------------------------------------------------------------------
+# Strategy API: build_strategy + generate_orders
+# ---------------------------------------------------------------------------
 
-spy_ret = daily_ret[:, 0]
-qqq_ret = daily_ret[:, 1]
-iwm_ret = daily_ret[:, 2]
-dia_ret = daily_ret[:, 3]
-xlf_ret = daily_ret[:, 4]
+def build_strategy(train_data):
+    """
+    Analyze training data and build strategy parameters.
 
-def cross_zscore(x):
-    mu = x.mean(dim=1, keepdim=True)
-    std = x.std(dim=1, keepdim=True).clamp(min=1e-8)
-    return (x - mu) / std
+    Args:
+        train_data: dict with ohlcv (D_train, N_all, 5), dates, tickers, etc.
 
-def compute_betas(daily_ret, ref_ret, lookback):
-    betas = torch.zeros(D, N_trade)
-    for t in range(lookback, D):
-        ref_w = ref_ret[t - lookback:t]
-        ref_dm = ref_w - ref_w.mean()
-        ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
-        for j in range(N_trade):
-            asset_w = daily_ret[t - lookback:t, j]
-            cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
-            betas[t, j] = cov / ref_var
-    betas[:lookback] = 1.0
-    return betas
+    Returns:
+        strategy dict (or any object) passed to generate_orders.
+    """
+    ohlcv = train_data["ohlcv"]
+    tradeable_idx = train_data["tradeable_indices"]
+    tickers = train_data["tradeable_tickers"]
+    D = ohlcv.shape[0]
 
-def risk_adj_momentum(ret_tensor, horizon, skip=5):
-    sig = torch.zeros(D, N_trade)
-    for t in range(horizon + skip, D):
-        window = ret_tensor[t - horizon - skip:t - skip]
-        cum_ret = window.sum(dim=0)
-        vol = window.std(dim=0).clamp(min=1e-8) * (horizon ** 0.5)
-        sig[t] = cum_ret / vol
-    return sig
+    # Compute daily close-to-close returns for tradeable assets
+    close = ohlcv[:, tradeable_idx, C]  # (D, N_tradeable)
+    log_close = torch.log(close.clamp(min=1e-8))
+    daily_ret = torch.zeros(D, len(tickers))
+    daily_ret[1:] = log_close[1:] - log_close[:-1]
 
-def simple_momentum(log_close, horizon):
-    sig = torch.zeros_like(log_close)
-    sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
-    return sig
+    # Rolling 20-day mean and std of returns per ticker
+    lookback = 20
+    mean_ret = torch.zeros(len(tickers))
+    std_ret = torch.zeros(len(tickers))
 
-print("Computing betas...")
-betas_spy = compute_betas(daily_ret, spy_ret, 42)
-betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
-betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
-betas_dia = compute_betas(daily_ret, dia_ret, 42)
-betas_xlf = compute_betas(daily_ret, xlf_ret, 42)
+    if D > lookback:
+        recent = daily_ret[-lookback:]
+        mean_ret = recent.mean(dim=0)
+        std_ret = recent.std(dim=0).clamp(min=1e-6)
 
-# Best from v27 sweep
-W_QQQ, W_IWM, W_DIA, W_XLF = 0.5, 0.6, 1.8, 0.5
+    # Average true range (ATR) for stop/limit calibration
+    highs = ohlcv[:, tradeable_idx, H]
+    lows = ohlcv[:, tradeable_idx, L]
+    closes = ohlcv[:, tradeable_idx, C]
 
-bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
-               - W_QQQ * betas_qqq * qqq_ret.unsqueeze(1) \
-               - W_IWM * betas_iwm * iwm_ret.unsqueeze(1) \
-               - W_DIA * betas_dia * dia_ret.unsqueeze(1) \
-               - W_XLF * betas_xlf * xlf_ret.unsqueeze(1)
+    tr = torch.zeros(D, len(tickers))
+    tr[1:] = torch.max(
+        torch.max(highs[1:] - lows[1:], (highs[1:] - closes[:-1]).abs()),
+        (lows[1:] - closes[:-1]).abs()
+    )
+    atr_14 = tr[-14:].mean(dim=0) if D >= 14 else tr.mean(dim=0)
+    atr_pct = (atr_14 / closes[-1].clamp(min=1e-8)).clamp(min=0.002, max=0.10)
 
-z_rev5 = cross_zscore(simple_momentum(log_close, 5))
+    return {
+        "tickers": tickers,
+        "tradeable_idx": tradeable_idx,
+        "mean_ret": mean_ret,
+        "std_ret": std_ret,
+        "atr_pct": atr_pct,  # average true range as % of price
+        "lookback": lookback,
+    }
 
-cs_disp = daily_ret.std(dim=1)
-disp_ma42 = torch.zeros(D)
-for t in range(42, D):
-    disp_ma42[t] = cs_disp[t - 42:t].mean()
-disp_ma42[:42] = cs_disp[:42].mean()
-dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
 
-mom_21_raw = torch.zeros(D, N_trade)
-for t in range(21, D):
-    mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
-sig_accel = torch.zeros(D, N_trade)
-for t in range(31, D):
-    sig_accel[t] = mom_21_raw[t] - mom_21_raw[t - 10]
-sig_accel = cross_zscore(sig_accel)
+def generate_orders(strategy, data, day_idx):
+    """
+    Generate day-trading orders for a single day.
 
-expected_ret_spy = betas_spy * spy_ret.unsqueeze(1)
-underreaction = expected_ret_spy - daily_ret
-sig_ur = torch.zeros(D, N_trade)
-for t in range(5, D):
-    sig_ur[t] = underreaction[t-5:t].sum(dim=0)
-sig_ur = cross_zscore(sig_ur)
+    Args:
+        strategy: returned by build_strategy
+        data: full data dict from load_data()
+              - data["ohlcv"][:day_idx] is known history
+              - data["ohlcv"][day_idx, :, O] is today's open (available at market open)
+              - DO NOT access today's H, L, C (that is future data)
+        day_idx: current day index in the full dataset
 
-W_REV, W_21, W_63, W_A, W_U, EMA = -0.40, 0.20, 0.30, -0.12, 0.15, 0.035
+    Returns:
+        list of order dicts:
+        [
+            {
+                "ticker": str,
+                "direction": "long" or "short",
+                "weight": float in (0, 1],
+                "stop_loss": float (price level),
+                "take_profit": float (price level),
+            },
+            ...
+        ]
+    """
+    ohlcv = data["ohlcv"]
+    tickers = strategy["tickers"]
+    tradeable_idx = strategy["tradeable_idx"]
+    atr_pct = strategy["atr_pct"]
+    lookback = strategy["lookback"]
 
-ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
-ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
-sig = (W_REV * z_rev5 + W_21 * ram_21 + W_63 * ram_63
-       + W_A * sig_accel + W_U * sig_ur) * dr
-smooth = torch.zeros(D, N_trade)
-smooth[0] = sig[0]
-for t in range(1, D):
-    smooth[t] = EMA * sig[t] + (1 - EMA) * smooth[t - 1]
+    if day_idx < lookback + 1:
+        return []
 
-smooth_gpu = smooth.to(device)
+    # Today's open price
+    today_open = ohlcv[day_idx, tradeable_idx, O]
 
-total_train_time = 0.0
-num_params = 0
+    # Recent returns for signal computation
+    closes = ohlcv[day_idx - lookback:day_idx, tradeable_idx, C]
+    log_closes = torch.log(closes.clamp(min=1e-8))
+    recent_ret = log_closes[-1] - log_closes[0]  # lookback-period return
+    recent_std = (log_closes[1:] - log_closes[:-1]).std(dim=0).clamp(min=1e-6)
 
-def predict_fn(ohlcv_history, meta):
-    return smooth_gpu[meta["today_idx"]]
+    # Z-score of recent return
+    z_scores = recent_ret / (recent_std * np.sqrt(lookback))
 
-results = evaluate_sharpe(predict_fn, data, device=device)
+    orders = []
+    n_tickers = len(tickers)
+    candidates = []
 
-t_end = time.time()
-peak_vram = torch.cuda.max_memory_allocated() / 1024 / 1024
+    for i in range(n_tickers):
+        open_price = float(today_open[i])
+        if open_price <= 0 or np.isnan(open_price):
+            continue
 
-print("---")
-print(f"sharpe_ratio:     {results['sharpe_ratio']:.4f}")
-print(f"total_return:     {results['total_return']:.4f}")
-print(f"max_drawdown:     {results['max_drawdown']:.4f}")
-print(f"avg_turnover:     {results['avg_turnover']:.4f}")
-print(f"num_test_days:    {results['num_test_days']}")
-print(f"training_seconds: {total_train_time:.1f}")
-print(f"total_seconds:    {t_end - t_start:.1f}")
-print(f"peak_vram_mb:     {peak_vram:.1f}")
-print(f"num_params:       {num_params:,}")
+        z = float(z_scores[i])
+        atr = float(atr_pct[i])
+
+        # Mean reversion: fade extreme moves
+        if z < -1.5:  # oversold -> go long
+            stop_pct = max(atr * 1.0, 0.005)   # 1x ATR or 0.5% minimum
+            target_pct = max(atr * 1.5, 0.008)  # 1.5x ATR or 0.8% minimum
+            candidates.append({
+                "ticker": tickers[i],
+                "direction": "long",
+                "signal_strength": abs(z),
+                "stop_loss": open_price * (1 - stop_pct),
+                "take_profit": open_price * (1 + target_pct),
+            })
+        elif z > 1.5:  # overbought -> go short
+            stop_pct = max(atr * 1.0, 0.005)
+            target_pct = max(atr * 1.5, 0.008)
+            candidates.append({
+                "ticker": tickers[i],
+                "direction": "short",
+                "signal_strength": abs(z),
+                "stop_loss": open_price * (1 + stop_pct),
+                "take_profit": open_price * (1 - target_pct),
+            })
+
+    if not candidates:
+        return []
+
+    # Sort by signal strength, take top 5
+    candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
+    candidates = candidates[:5]
+
+    # Equal-weight allocation
+    weight_each = 1.0 / len(candidates)
+
+    for c in candidates:
+        orders.append({
+            "ticker": c["ticker"],
+            "direction": c["direction"],
+            "weight": weight_each,
+            "stop_loss": c["stop_loss"],
+            "take_profit": c["take_profit"],
+        })
+
+    return orders
+
+
+# ---------------------------------------------------------------------------
+# Run evaluation
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    results = evaluate(build_strategy, generate_orders, device="cpu")
+
+    t_end = time.time()
+    peak_vram = torch.cuda.max_memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0
+
+    print("\n---")
+    print(f"sharpe_ratio:     {results['sharpe_ratio']:.4f}")
+    print(f"total_return:     {results['total_return']*100:.2f}%")
+    print(f"max_drawdown:     {results['max_drawdown']*100:.2f}%")
+    print(f"win_rate:         {results['win_rate']*100:.1f}%")
+    print(f"avg_daily_trades: {results['avg_daily_trades']:.1f}")
+    print(f"num_slices:       {results['num_slices']}")
+    print(f"total_seconds:    {t_end - t_start:.1f}")
+    print(f"peak_vram_mb:     {peak_vram:.1f}")
