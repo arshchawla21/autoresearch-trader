@@ -1,11 +1,13 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v27: Loosened v26 for more activity.
-- Long-only (v24: most consistent, rides market drift)
-- Cash only in SEVERE downtrends (SPY_mom_20 < -4%)
-- Lower threshold (0.55) for more trades
-- Top 6 positions instead of 5
+v28: Always-invested daily long portfolio.
+Completely different paradigm: instead of predicting WHEN to trade,
+use the NN for stock SELECTION. Every day, go long the top 8 stocks
+ranked by NN probability. Always fully invested.
+
+Win rate = fraction of days portfolio rises (market drift + NN selection).
+This is a daily-rebalanced factor portfolio, not a threshold strategy.
 
 Usage: uv run train.py
 """
@@ -159,46 +161,46 @@ def generate_orders(strategy, data, day_idx):
     feats, atr_pct, spy_mom, vix = compute_features(
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
-
-    # BEAR MARKET FILTER: stay flat only in severe downtrend
-    if spy_mom < -0.04:
-        return []
-
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
         logits = model(feats_norm.to(dev)).cpu()
         probs = torch.sigmoid(logits)
 
-    vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
+    # VIX-based position scaling
+    total_exposure = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    # LONG ONLY with lowered threshold for more activity
-    long_thresh = 0.55
+    # In severe bear markets, reduce exposure but don't go to zero
+    if spy_mom < -0.04:
+        total_exposure *= 0.3
+    elif spy_mom < -0.02:
+        total_exposure *= 0.5
 
-    candidates = []
+    # Rank ALL stocks by probability, pick top 8
+    scored = []
     for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0 or np.isnan(op):
             continue
         p = float(probs[i])
         ap = float(atr_pct[i])
+        scored.append((i, p, op, ap))
 
-        if p > long_thresh:
-            candidates.append((i, p, op, ap))
-
-    if not candidates:
+    if not scored:
         return []
 
-    # Top 6 by confidence
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    candidates = candidates[:6]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_picks = scored[:8]
 
-    weight_each = vol_scale / len(candidates)
-    stop_m = 1.5
-    target_m = 2.0
+    # Equal weight across picks
+    weight_each = total_exposure / len(top_picks)
+
+    # Wide stops — just catastrophe protection. Exits mostly at close.
+    stop_m = 2.0
+    target_m = 3.0
 
     orders = []
-    for (idx, _, op, ap) in candidates:
+    for (idx, _, op, ap) in top_picks:
         orders.append({
             "ticker": tickers[idx],
             "direction": "long",
