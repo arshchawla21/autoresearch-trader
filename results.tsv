@@ -40,3 +40,5 @@ v43-recency-weighted	0.6953	1.54	-3.86	51.8	20.0	0.0	9.9	27.1	v37 + exponential 
 v44-huber-regression	0.8467	2.35	-3.20	51.7	20.0	0.0	9.6	26.9	NEW BEST! Huber regression predicting returns > BCE classification for ranking. +0.12 Sharpe, +45% return vs v37.
 v45-multitask-recency	0.5282	1.38	-3.80	51.1	20.0	0.0	10.7	27.7	Multi-task (Huber+BCE) + recency weighting. Worse — added complexity hurts pure regression.
 v46-huber-vix-scaling	0.8002	1.65	-2.52	50.7	19.7	0.0	9.6	26.9	v44 + VIX position scaling. Best drawdown ever (-2.52%) but returns drop. Capital protection vs returns tradeoff.
+v47-huber-ensemble-3	0.5299	1.64	-3.68	51.6	20.0	0.0	15.0	27.0	3-model Huber ensemble. Averaging dilutes signal — single model beats ensemble for both cls and reg.
+v48-huber-opt-stops	0.9001	2.47	-3.10	51.8	20.0	0.0	33.7	26.9	NEW BEST! v44 + per-slice stop calibration (grid search SL/TP on recent 125d). Sharpe >0.90!

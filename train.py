@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v46: v44 Huber regression + VIX-based position scaling.
-In high-VIX environments (>25), reduce position sizes to protect capital.
-In low-VIX (<15), full sizing. Linear interpolation between.
-Also try: tighter stops in high VIX, wider in low VIX.
+v48: v44 Huber regression + optimized stops.
+Search for optimal SL/TP multipliers on the last 250 days of training data.
+The model trains on all data, but stop calibration uses recent data only
+(market microstructure changes over time).
 
 Usage: uv run train.py
 """
@@ -95,9 +95,6 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
     breadth = (prev_day_close > prev_day_open).float().mean().item()
 
-    # Raw VIX value for position scaling (not normalized)
-    raw_vix = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx else 15.0
-
     features = torch.stack([
         r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
         torch.full((N,), vix_val),
@@ -108,7 +105,56 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
         torch.full((N,), breadth),
     ], dim=1)
 
-    return features, atr_pct, raw_vix
+    return features, atr_pct
+
+
+def simulate_day(pred_ret, today_open, today_high, today_low, today_close,
+                 atr_pct, tickers, sl_mult, tp_mult):
+    """Simulate one day's trading to evaluate stop params."""
+    N = len(tickers)
+    scored = []
+    for i in range(N):
+        op = float(today_open[i])
+        if op <= 0:
+            continue
+        scored.append((i, float(pred_ret[i]), op, float(atr_pct[i])))
+
+    if len(scored) < 10:
+        return 0.0
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    longs = scored[:10]
+    shorts = scored[-10:]
+    w = 1.0 / 20
+
+    daily_ret = 0.0
+    for (idx, _, op, ap) in longs:
+        sl = op * (1 - ap * sl_mult)
+        tp = op * (1 + ap * tp_mult)
+        hi = float(today_high[idx])
+        lo = float(today_low[idx])
+        cl = float(today_close[idx])
+        if lo <= sl:
+            daily_ret += w * (sl - op) / op
+        elif hi >= tp:
+            daily_ret += w * (tp - op) / op
+        else:
+            daily_ret += w * (cl - op) / op
+
+    for (idx, _, op, ap) in shorts:
+        sl = op * (1 + ap * sl_mult)
+        tp = op * (1 - ap * tp_mult)
+        hi = float(today_high[idx])
+        lo = float(today_low[idx])
+        cl = float(today_close[idx])
+        if hi >= sl:
+            daily_ret += w * (op - sl) / op
+        elif lo <= tp:
+            daily_ret += w * (op - tp) / op
+        else:
+            daily_ret += w * (op - cl) / op
+
+    return daily_ret
 
 
 def build_strategy(train_data):
@@ -124,7 +170,7 @@ def build_strategy(train_data):
     min_day = 21
     X_list, y_list = [], []
     for d in range(min_day, D):
-        feats, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+        feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
         intraday = intraday.clamp(-0.10, 0.10)
         X_list.append(feats)
@@ -164,6 +210,41 @@ def build_strategy(train_data):
             optimizer.step()
     model.eval()
 
+    # Calibrate stops on last 125 days of training data
+    N = len(tradeable_idx)
+    cal_start = max(min_day, D - 125)
+    best_sharpe = -999
+    best_sl, best_tp = 1.5, 2.5
+
+    for sl_mult in [1.0, 1.5, 2.0, 2.5]:
+        for tp_mult in [1.5, 2.0, 2.5, 3.0, 3.5]:
+            daily_rets = []
+            for d in range(cal_start, D):
+                feats, atr = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+                feats_n = (feats - feat_mean) / feat_std
+                with torch.no_grad():
+                    pn = model(feats_n.to(dev)).cpu()
+                    pr = pn * y_std + y_mean
+
+                ret = simulate_day(
+                    pr,
+                    ohlcv[d, tradeable_idx, O],
+                    ohlcv[d, tradeable_idx, H],
+                    ohlcv[d, tradeable_idx, L],
+                    ohlcv[d, tradeable_idx, C],
+                    atr, tickers, sl_mult, tp_mult
+                )
+                daily_rets.append(ret)
+
+            rets = torch.tensor(daily_rets)
+            if rets.std() > 0:
+                sharpe = rets.mean() / rets.std() * (252 ** 0.5)
+            else:
+                sharpe = 0.0
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_sl, best_tp = sl_mult, tp_mult
+
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
@@ -173,6 +254,8 @@ def build_strategy(train_data):
         "feat_std": feat_std,
         "y_mean": float(y_mean),
         "y_std": float(y_std),
+        "sl_mult": best_sl,
+        "tp_mult": best_tp,
     }
 
 
@@ -186,13 +269,15 @@ def generate_orders(strategy, data, day_idx):
     feat_std = strategy["feat_std"]
     y_mean = strategy["y_mean"]
     y_std = strategy["y_std"]
+    sl_mult = strategy["sl_mult"]
+    tp_mult = strategy["tp_mult"]
     n_tickers = len(tickers)
 
     if day_idx < 21:
         return []
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
-    feats, atr_pct, raw_vix = compute_features(
+    feats, atr_pct = compute_features(
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
     feats_norm = (feats - feat_mean) / feat_std
@@ -200,19 +285,6 @@ def generate_orders(strategy, data, day_idx):
     with torch.no_grad():
         pred_norm = model(feats_norm.to(dev)).cpu()
         pred_ret = pred_norm * y_std + y_mean
-
-    # VIX-based position scaling: full at VIX<15, half at VIX>30, zero at VIX>40
-    if raw_vix < 15:
-        vix_scale = 1.0
-    elif raw_vix < 30:
-        vix_scale = 1.0 - 0.5 * (raw_vix - 15) / 15
-    elif raw_vix < 40:
-        vix_scale = 0.5 - 0.5 * (raw_vix - 30) / 10
-    else:
-        vix_scale = 0.0
-
-    if vix_scale < 0.05:
-        return []
 
     scored = []
     for i in range(n_tickers):
@@ -234,7 +306,7 @@ def generate_orders(strategy, data, day_idx):
     shorts = scored[-n_short:]
 
     total = n_long + n_short
-    w = vix_scale / total
+    w = 1.0 / total
 
     orders = []
     for (idx, _, op, ap) in longs:
@@ -242,8 +314,8 @@ def generate_orders(strategy, data, day_idx):
             "ticker": tickers[idx],
             "direction": "long",
             "weight": w,
-            "stop_loss": op * (1 - ap * 1.5),
-            "take_profit": op * (1 + ap * 2.5),
+            "stop_loss": op * (1 - ap * sl_mult),
+            "take_profit": op * (1 + ap * tp_mult),
         })
 
     for (idx, _, op, ap) in shorts:
@@ -251,8 +323,8 @@ def generate_orders(strategy, data, day_idx):
             "ticker": tickers[idx],
             "direction": "short",
             "weight": w,
-            "stop_loss": op * (1 + ap * 1.5),
-            "take_profit": op * (1 - ap * 2.5),
+            "stop_loss": op * (1 + ap * sl_mult),
+            "take_profit": op * (1 - ap * tp_mult),
         })
 
     return orders
