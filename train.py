@@ -1,11 +1,11 @@
 """
-v16-multi-bar-signal: Combine 1-bar and 2-bar momentum signals.
+v17-atr-normalized: Rank stocks by momentum/ATR (z-score-like selection).
 
-Hypothesis: averaging the 1-bar and 2-bar mean-reversion signals is more
-robust — it smooths noise while still being responsive. The stock with
-the strongest combined signal gets traded.
+Hypothesis: normalizing momentum by ATR selects stocks with the most
+unusual moves relative to their typical volatility, not just the biggest
+absolute movers. A 0.5% move in XLU is more extreme than 0.5% in TSLA.
 
-Uses training-period ATR with v9 stops (0.7x/4.0x).
+Uses v9 stops (0.7x/4.0x ATR), 2-bar lookback.
 """
 
 import os
@@ -42,26 +42,20 @@ def generate_orders(strategy, data, bar_idx):
     avg_atr = strategy["avg_atr_pct"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
+    past_close = ohlcv[bar_idx - 2, tidx, C].numpy()
+    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
 
-    # 1-bar signal: open-to-close of previous bar
-    prev_open = ohlcv[bar_idx - 1, tidx, O].numpy()
-    prev_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    sig1 = (prev_close - prev_open) / np.maximum(prev_open, 1e-8)
-
-    # 2-bar signal: close 2 bars ago to close 1 bar ago
-    close_2ago = ohlcv[bar_idx - 2, tidx, C].numpy()
-    sig2 = (prev_close - close_2ago) / np.maximum(close_2ago, 1e-8)
-
-    # Combined signal (average)
-    combined = (sig1 + sig2) / 2.0
-
-    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(combined))[0]
+    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
     if len(valid) == 0:
         return []
 
-    best = valid[np.argmax(np.abs(combined[valid]))]
-    mom = float(combined[best])
-    if abs(mom) < 0.0005:
+    # Normalize by ATR: how many ATRs did the stock move?
+    atr_norm = np.abs(momentum[valid]) / np.maximum(avg_atr[valid], 1e-8)
+    best = valid[np.argmax(atr_norm)]
+
+    mom = float(momentum[best])
+    if abs(mom) < 0.0003:
         return []
 
     ticker = tickers[best]
