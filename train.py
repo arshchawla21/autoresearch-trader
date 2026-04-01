@@ -1,10 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v19: Classification NN (like v11 winner) + soft regime bias.
-Instead of hard regime filter, use SPY trend to adjust confidence thresholds.
-Uptrend: lower long threshold, raise short threshold (favor longs).
-Downtrend: opposite. This keeps the system trading in all regimes.
+v20: Ensemble of 3 classification NNs (different seeds) averaged.
+Same architecture as v11 (the best so far). Ensemble should reduce
+variance across slices without adding complexity.
 
 Usage: uv run train.py
 """
@@ -20,7 +19,6 @@ import torch.nn as nn
 from prepare import O, H, L, C, evaluate
 
 t_start = time.time()
-torch.manual_seed(42)
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -83,6 +81,32 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     return features, atr_pct, spy_mom, vix_val * 30.0
 
 
+def train_single_model(X_norm, y, seed):
+    torch.manual_seed(seed)
+    n_features = X_norm.shape[1]
+    model = IntradayPredictor(n_features).to(dev)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    X_train = X_norm.to(dev)
+    y_train = y.to(dev)
+
+    batch_size = 2048
+    n_samples = X_train.shape[0]
+    n_epochs = min(50, max(5, 300 * 1000 // n_samples))
+
+    model.train()
+    for _ in range(n_epochs):
+        perm = torch.randperm(n_samples, device=dev)
+        for start in range(0, n_samples, batch_size):
+            idx = perm[start:min(start + batch_size, n_samples)]
+            loss = criterion(model(X_train[idx]), y_train[idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    model.eval()
+    return model
+
+
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"]
     tradeable_idx = train_data["tradeable_indices"]
@@ -109,33 +133,16 @@ def build_strategy(train_data):
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
-    n_features = X_norm.shape[1]
-    model = IntradayPredictor(n_features).to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
-    X_train = X_norm.to(dev)
-    y_train = y.to(dev)
-
-    batch_size = 2048
-    n_samples = X_train.shape[0]
-    n_epochs = min(50, max(5, 300 * 1000 // n_samples))
-
-    model.train()
-    for _ in range(n_epochs):
-        perm = torch.randperm(n_samples, device=dev)
-        for start in range(0, n_samples, batch_size):
-            idx = perm[start:min(start + batch_size, n_samples)]
-            loss = criterion(model(X_train[idx]), y_train[idx])
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-    model.eval()
+    # Train 3 models with different seeds
+    models = []
+    for seed in [42, 123, 7]:
+        models.append(train_single_model(X_norm, y, seed))
 
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "all_tickers": all_tickers,
-        "model": model,
+        "models": models,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
     }
@@ -146,7 +153,7 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     all_tickers = strategy["all_tickers"]
-    model = strategy["model"]
+    models = strategy["models"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
     n_tickers = len(tickers)
@@ -160,19 +167,18 @@ def generate_orders(strategy, data, day_idx):
     )
     feats_norm = (feats - feat_mean) / feat_std
 
+    # Average predictions from all models
     with torch.no_grad():
-        logits = model(feats_norm.to(dev)).cpu()
-        probs = torch.sigmoid(logits)
+        probs_sum = torch.zeros(n_tickers)
+        for model in models:
+            logits = model(feats_norm.to(dev)).cpu()
+            probs_sum += torch.sigmoid(logits)
+        probs = probs_sum / len(models)
 
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    # Soft regime bias: shift thresholds based on SPY trend
-    # Neutral: long_thresh=0.58, short_thresh=0.42 (from v11)
-    # Uptrend (spy_mom > 0): lower long thresh, raise short thresh
-    # Downtrend (spy_mom < 0): raise long thresh, lower short thresh
-    regime_shift = np.clip(spy_mom * 2.0, -0.04, 0.04)  # max ±4% shift
-    long_thresh = 0.58 - regime_shift   # easier to go long in uptrend
-    short_thresh = 0.42 - regime_shift  # easier to go short in downtrend
+    long_thresh = 0.58
+    short_thresh = 0.42
 
     candidates = []
     for i in range(n_tickers):
@@ -190,7 +196,6 @@ def generate_orders(strategy, data, day_idx):
     if not candidates:
         return []
 
-    # Sort by confidence margin, take top 5
     candidates.sort(key=lambda x: x[2], reverse=True)
     candidates = candidates[:5]
 
