@@ -90,9 +90,9 @@ def build_strategy(train_data):
     opens = ohlcv[:, tradeable_idx, O]
     closes = ohlcv[:, tradeable_idx, C]
 
-    # Only use recent data for training
+    # Use all training data
     min_day = 21
-    train_start = max(min_day, D - 500)
+    train_start = min_day
 
     X_list, y_list = [], []
     for d in range(train_start, D):
@@ -118,7 +118,7 @@ def build_strategy(train_data):
 
     batch_size = 2048
     n_samples = X_train.shape[0]
-    n_epochs = min(80, max(10, 500 * 1000 // n_samples))
+    n_epochs = min(50, max(5, 300 * 1000 // n_samples))
 
     model.train()
     for _ in range(n_epochs):
@@ -167,50 +167,70 @@ def generate_orders(strategy, data, day_idx):
     vix = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx else 20.0
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    n_tickers = len(tickers)
-    candidates = []
+    # Cross-sectional: rank by NN probability
+    sorted_idx = probs.argsort(descending=True)
+    top_prob = float(probs[sorted_idx[0]])
+    bot_prob = float(probs[sorted_idx[-1]])
 
-    for i in range(n_tickers):
-        op = float(today_open[i])
-        if op <= 0 or np.isnan(op):
-            continue
-        p = float(probs[i])
-        ap = float(atr_pct[i])
-        confidence = abs(p - 0.5)
-
-        if p > 0.56:
-            candidates.append(("long", i, confidence, op, ap))
-        elif p < 0.44:
-            candidates.append(("short", i, confidence, op, ap))
-
-    if not candidates:
+    # Only trade when spread is meaningful (model sees differentiation)
+    spread = top_prob - bot_prob
+    if spread < 0.06:
         return []
 
-    candidates.sort(key=lambda x: x[2], reverse=True)
-    candidates = candidates[:5]
-
-    weight_each = vol_scale / len(candidates)
+    # Also use absolute threshold: top must be >0.52, bottom must be <0.48
+    n_long = 2
+    n_short = 2
     stop_m = 1.5
     target_m = 2.0
 
+    long_picks = []
+    for j in range(min(5, len(sorted_idx))):
+        i = int(sorted_idx[j])
+        op = float(today_open[i])
+        if op <= 0 or np.isnan(op):
+            continue
+        if float(probs[i]) < 0.52:
+            break
+        long_picks.append((i, op, float(atr_pct[i])))
+        if len(long_picks) >= n_long:
+            break
+
+    short_picks = []
+    for j in range(1, min(6, len(sorted_idx) + 1)):
+        i = int(sorted_idx[-j])
+        op = float(today_open[i])
+        if op <= 0 or np.isnan(op):
+            continue
+        if float(probs[i]) > 0.48:
+            break
+        short_picks.append((i, op, float(atr_pct[i])))
+        if len(short_picks) >= n_short:
+            break
+
+    n_total = len(long_picks) + len(short_picks)
+    if n_total == 0:
+        return []
+
+    weight_each = vol_scale / n_total
     orders = []
-    for (direction, idx, _, op, ap) in candidates:
-        if direction == "long":
-            orders.append({
-                "ticker": tickers[idx],
-                "direction": "long",
-                "weight": weight_each,
-                "stop_loss": op * (1 - ap * stop_m),
-                "take_profit": op * (1 + ap * target_m),
-            })
-        else:
-            orders.append({
-                "ticker": tickers[idx],
-                "direction": "short",
-                "weight": weight_each,
-                "stop_loss": op * (1 + ap * stop_m),
-                "take_profit": op * (1 - ap * target_m),
-            })
+
+    for (idx, op, ap) in long_picks:
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "long",
+            "weight": weight_each,
+            "stop_loss": op * (1 - ap * stop_m),
+            "take_profit": op * (1 + ap * target_m),
+        })
+
+    for (idx, op, ap) in short_picks:
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "short",
+            "weight": weight_each,
+            "stop_loss": op * (1 + ap * stop_m),
+            "take_profit": op * (1 - ap * target_m),
+        })
 
     return orders
 
