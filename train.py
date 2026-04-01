@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v48: v44 Huber regression + optimized stops.
-Search for optimal SL/TP multipliers on the last 250 days of training data.
-The model trains on all data, but stop calibration uses recent data only
-(market microstructure changes over time).
+v50: v48 + asymmetric L12/S8 + search over long/short counts.
+Markets have a structural bull bias. Instead of symmetric L10/S10,
+try biasing toward longs. Also: search L/S counts on calibration data
+alongside stop params.
 
 Usage: uv run train.py
 """
@@ -109,31 +109,28 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
 
 
 def simulate_day(pred_ret, today_open, today_high, today_low, today_close,
-                 atr_pct, tickers, sl_mult, tp_mult):
-    """Simulate one day's trading to evaluate stop params."""
-    N = len(tickers)
+                 atr_pct, n_tickers, sl_mult, tp_mult, n_long, n_short):
     scored = []
-    for i in range(N):
+    for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0:
             continue
         scored.append((i, float(pred_ret[i]), op, float(atr_pct[i])))
 
-    if len(scored) < 10:
+    if len(scored) < max(n_long, n_short) + 5:
         return 0.0
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    longs = scored[:10]
-    shorts = scored[-10:]
-    w = 1.0 / 20
+    longs = scored[:n_long]
+    shorts = scored[-n_short:]
+    total = n_long + n_short
+    w = 1.0 / total
 
     daily_ret = 0.0
     for (idx, _, op, ap) in longs:
         sl = op * (1 - ap * sl_mult)
         tp = op * (1 + ap * tp_mult)
-        hi = float(today_high[idx])
-        lo = float(today_low[idx])
-        cl = float(today_close[idx])
+        hi, lo, cl = float(today_high[idx]), float(today_low[idx]), float(today_close[idx])
         if lo <= sl:
             daily_ret += w * (sl - op) / op
         elif hi >= tp:
@@ -144,9 +141,7 @@ def simulate_day(pred_ret, today_open, today_high, today_low, today_close,
     for (idx, _, op, ap) in shorts:
         sl = op * (1 + ap * sl_mult)
         tp = op * (1 - ap * tp_mult)
-        hi = float(today_high[idx])
-        lo = float(today_low[idx])
-        cl = float(today_close[idx])
+        hi, lo, cl = float(today_high[idx]), float(today_low[idx]), float(today_close[idx])
         if hi >= sl:
             daily_ret += w * (op - sl) / op
         elif lo <= tp:
@@ -210,40 +205,43 @@ def build_strategy(train_data):
             optimizer.step()
     model.eval()
 
-    # Calibrate stops on last 125 days of training data
+    # Joint search: SL/TP multipliers + L/S counts
     N = len(tradeable_idx)
     cal_start = max(min_day, D - 125)
     best_sharpe = -999
     best_sl, best_tp = 1.5, 2.5
+    best_nl, best_ns = 10, 10
 
     for sl_mult in [1.0, 1.5, 2.0, 2.5]:
         for tp_mult in [1.5, 2.0, 2.5, 3.0, 3.5]:
-            daily_rets = []
-            for d in range(cal_start, D):
-                feats, atr = compute_features(ohlcv, tradeable_idx, all_tickers, d)
-                feats_n = (feats - feat_mean) / feat_std
-                with torch.no_grad():
-                    pn = model(feats_n.to(dev)).cpu()
-                    pr = pn * y_std + y_mean
+            for nl, ns in [(10, 10), (12, 8), (8, 12), (14, 6)]:
+                daily_rets = []
+                for d in range(cal_start, D):
+                    feats, atr = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+                    feats_n = (feats - feat_mean) / feat_std
+                    with torch.no_grad():
+                        pn = model(feats_n.to(dev)).cpu()
+                        pr = pn * y_std + y_mean
 
-                ret = simulate_day(
-                    pr,
-                    ohlcv[d, tradeable_idx, O],
-                    ohlcv[d, tradeable_idx, H],
-                    ohlcv[d, tradeable_idx, L],
-                    ohlcv[d, tradeable_idx, C],
-                    atr, tickers, sl_mult, tp_mult
-                )
-                daily_rets.append(ret)
+                    ret = simulate_day(
+                        pr,
+                        ohlcv[d, tradeable_idx, O],
+                        ohlcv[d, tradeable_idx, H],
+                        ohlcv[d, tradeable_idx, L],
+                        ohlcv[d, tradeable_idx, C],
+                        atr, N, sl_mult, tp_mult, nl, ns
+                    )
+                    daily_rets.append(ret)
 
-            rets = torch.tensor(daily_rets)
-            if rets.std() > 0:
-                sharpe = rets.mean() / rets.std() * (252 ** 0.5)
-            else:
-                sharpe = 0.0
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_sl, best_tp = sl_mult, tp_mult
+                rets = torch.tensor(daily_rets)
+                if rets.std() > 0:
+                    sharpe = rets.mean() / rets.std() * (252 ** 0.5)
+                else:
+                    sharpe = 0.0
+                if sharpe > best_sharpe:
+                    best_sharpe = sharpe
+                    best_sl, best_tp = sl_mult, tp_mult
+                    best_nl, best_ns = nl, ns
 
     return {
         "tickers": tickers,
@@ -256,6 +254,8 @@ def build_strategy(train_data):
         "y_std": float(y_std),
         "sl_mult": best_sl,
         "tp_mult": best_tp,
+        "n_long": best_nl,
+        "n_short": best_ns,
     }
 
 
@@ -271,6 +271,8 @@ def generate_orders(strategy, data, day_idx):
     y_std = strategy["y_std"]
     sl_mult = strategy["sl_mult"]
     tp_mult = strategy["tp_mult"]
+    n_long = strategy["n_long"]
+    n_short = strategy["n_short"]
     n_tickers = len(tickers)
 
     if day_idx < 21:
@@ -295,13 +297,10 @@ def generate_orders(strategy, data, day_idx):
         ap = float(atr_pct[i])
         scored.append((i, r, op, ap))
 
-    if len(scored) < 10:
+    if len(scored) < max(n_long, n_short) + 5:
         return []
 
     scored.sort(key=lambda x: x[1], reverse=True)
-
-    n_long = 10
-    n_short = 10
     longs = scored[:n_long]
     shorts = scored[-n_short:]
 
