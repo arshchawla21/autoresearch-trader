@@ -1,10 +1,9 @@
 """
-v23-weighted-multi: Weighted multi-stock - heavy on #1, lighter on #2-3.
+v24-all-stocks-weighted: Trade ALL stocks, weight proportional to momentum.
 
-Hypothesis: combine the best of concentrated (v20) and diversified (v21).
-Give 60% weight to the biggest mover, 20% each to #2 and #3. This keeps
-the signal strength of concentration while adding some diversification.
-Zero fees means the extra trades are free.
+Hypothesis: with zero fees, every mean-reversion signal has positive EV.
+Trade all stocks with weight proportional to |momentum| — bigger movers
+get more capital. Maximum diversification + signal-proportional sizing.
 """
 
 import os
@@ -50,16 +49,19 @@ def generate_orders(strategy, data, bar_idx):
         return []
 
     abs_mom = np.abs(momentum[valid])
-    n = min(3, len(valid))
-    top_indices = valid[np.argsort(-abs_mom)[:n]]
+    total_mom = abs_mom.sum()
+    if total_mom < 1e-10:
+        return []
 
-    weights = [0.6, 0.2, 0.2][:n]
-    # Renormalize if fewer than 3
-    total_w = sum(weights)
-    weights = [w / total_w for w in weights]
+    # Weight proportional to |momentum|
+    weights = abs_mom / total_mom
 
     orders = []
-    for i, idx in enumerate(top_indices):
+    for i, idx in enumerate(valid):
+        w = float(weights[i])
+        if w < 0.01:  # skip negligible weights
+            continue
+
         ticker = tickers[idx]
         op = float(opens[idx])
         mom = float(momentum[idx])
@@ -80,7 +82,7 @@ def generate_orders(strategy, data, bar_idx):
         orders.append({
             "ticker": ticker,
             "direction": direction,
-            "weight": weights[i],
+            "weight": w,
             "stop_loss": sl,
             "take_profit": tp,
         })

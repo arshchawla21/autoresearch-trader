@@ -22,3 +22,4 @@ v20-high-freq	11.3988	0.1950	-0.0270	0.545	1.00	0.0	0.0	0	No threshold, tight TP
 v21-multi-stock	8.9837	0.0898	-0.0163	0.519	5.00	0.0	0.0	0	Top 5 movers equal weight - lower DD but diluted signal
 v22-scalper	8.0722	0.1125	-0.0284	0.581	1.00	0.0	0.0	0	Ultra-tight TP 0.5x ATR - high win% but too small profits
 v23-weighted-multi	11.7061	0.1543	-0.0243	0.551	3.00	0.0	0.0	0	60/20/20 weighted top 3 movers - NEW BEST
+v24-all-weighted	9.9769	0.0727	-0.0112	0.533	23.64	0.0	0.0	0	All stocks mom-proportional weight - low DD but diluted
