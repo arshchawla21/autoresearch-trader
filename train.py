@@ -1,12 +1,10 @@
 """
-v19-spy-only: Trade only SPY with VIX regime awareness.
+v20-high-freq: Trade every bar, fade the biggest mover. Zero fees = free trades.
 
-Hypothesis: concentrating on SPY alone might work because (1) it's the most
-liquid and efficient for mean-reversion, (2) VIX gives a direct read on whether
-SPY is in a fear/greed extreme. If VIX is rising (fear), fade SPY selloffs;
-if VIX is falling (complacency), fade SPY rallies.
-
-Uses v9 stops (0.7x/4.0x ATR).
+Hypothesis: with no transaction costs, trading every single bar maximizes
+the number of mean-reversion samples. More trades = smoother equity curve
+= higher Sharpe. Use very tight TP (grab small profits quickly) since we're
+trading every 15 minutes. No threshold filter — always trade.
 """
 
 import os
@@ -21,30 +19,15 @@ t_start = time.time()
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
-    tickers = train_data["tradeable_tickers"]
-
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
     lows = ohlcv[:, tidx, L]
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
-
-    spy_idx = tickers.index("SPY") if "SPY" in tickers else 0
-
-    # Find VIX in all tickers
-    all_tickers = train_data["all_tickers"]
-    vix_global_idx = None
-    for i, t in enumerate(all_tickers):
-        if t == "^VIX":
-            vix_global_idx = i
-            break
-
     return {
-        "tickers": tickers,
+        "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
         "avg_atr_pct": avg_atr_pct,
-        "spy_idx": spy_idx,
-        "vix_global_idx": vix_global_idx,
     }
 
 
@@ -56,26 +39,31 @@ def generate_orders(strategy, data, bar_idx):
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
-    spy_idx = strategy["spy_idx"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    op = float(opens[spy_idx])
-    if op <= 0 or np.isnan(op):
+
+    # 2-bar momentum
+    past_close = ohlcv[bar_idx - 2, tidx, C].numpy()
+    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
+
+    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
+    if len(valid) == 0:
         return []
 
-    # 2-bar momentum for SPY
-    past_close = float(ohlcv[bar_idx - 2, tidx[spy_idx], C])
-    curr_close = float(ohlcv[bar_idx - 1, tidx[spy_idx], C])
-    momentum = (curr_close - past_close) / max(abs(past_close), 1e-8)
+    # Always pick the biggest mover — no threshold
+    best = valid[np.argmax(np.abs(momentum[valid]))]
 
-    if abs(momentum) < 0.0005:
-        return []
+    ticker = tickers[best]
+    op = float(opens[best])
+    mom = float(momentum[best])
+    atr = float(avg_atr[best])
 
-    direction = "short" if momentum > 0 else "long"
-    atr = float(avg_atr[spy_idx])
+    direction = "short" if mom > 0 else "long"
 
+    # Tight TP for quick scalps, reasonable SL
     sl_dist = max(atr * 0.7, 0.001) * op
-    tp_dist = max(atr * 4.0, 0.005) * op
+    tp_dist = max(atr * 1.0, 0.0015) * op
 
     if direction == "long":
         sl = op - sl_dist
@@ -85,7 +73,7 @@ def generate_orders(strategy, data, bar_idx):
         tp = op - tp_dist
 
     return [{
-        "ticker": "SPY",
+        "ticker": ticker,
         "direction": direction,
         "weight": 1.0,
         "stop_loss": sl,
