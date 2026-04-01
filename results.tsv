@@ -19,3 +19,4 @@ v22-nn-trade-outcome	-0.2177	-2.75	-10.15	44.4	3.0	0.0	12.1	24.9	Train on actual
 v23-rich-features-sym	0.3204	2.06	-9.61	28.2	1.9	0.0	8.9	25.4	Rich candlestick features (17 total) + symmetric 1x ATR TP/SL. Win rate up to 28% but not enough edge.
 v24-long-only	0.3756	1.97	-9.00	32.4	2.0	0.0	8.8	25.4	Long-only NN with rich features. Most consistent ever — all recent slices positive. But win rate still 32%.
 v25-pure-direction	-0.2371	-2.43	-10.83	35.6	2.9	0.0	8.6	25.7	Very wide 3x ATR TP/SL, pure close-exit. Win rate ~50% in bull slices but destroyed in bears without stop protection.
+v26-long-only-bear-filter	0.5353	1.50	-4.64	8.5	0.4	0.0	6.7	24.9	NEW BEST Sharpe! Long-only + cash in bear (spy_mom<-2%). But too few trades (0.4/day), 4 zero-trade slices.

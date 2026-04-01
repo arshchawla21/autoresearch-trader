@@ -1,10 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v25: Pure direction play with wide stops.
-Set TP/SL at 3x ATR — they almost never trigger. Every trade exits
-at close. Win rate = directional accuracy (~53% base + NN edge).
-Long only. Added day-of-week and market breadth features.
+v26: Best-of-breed synthesis.
+- Long-only (v24: most consistent, rides market drift)
+- Cash in downtrends (SPY_mom_20 < -2%: stay flat, avoid bear losses)
+- v11's exact features, architecture, thresholds (proven Sharpe=0.45)
+- v11's stop/target (1.5x ATR / 2.0x ATR)
 
 Usage: uv run train.py
 """
@@ -17,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from prepare import O, H, L, C, V, evaluate
+from prepare import O, H, L, C, evaluate
 
 t_start = time.time()
 torch.manual_seed(42)
@@ -41,12 +42,9 @@ class IntradayPredictor(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx, dates=None):
+def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     N = len(tradeable_idx)
     prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
-    prev_open = ohlcv[day_idx - 1, tradeable_idx, O]
-    prev_high = ohlcv[day_idx - 1, tradeable_idx, H]
-    prev_low = ohlcv[day_idx - 1, tradeable_idx, L]
     today_open = ohlcv[day_idx, tradeable_idx, O]
 
     def ret(d):
@@ -56,10 +54,10 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx, dates=None):
     r1, r3, r5, r10, r20 = ret(1), ret(3), ret(5), ret(10), ret(20)
     gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
 
-    highs_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
-    lows_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
-    closes_14p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
-    tr = torch.max(torch.max(highs_14 - lows_14, (highs_14 - closes_14p).abs()), (lows_14 - closes_14p).abs())
+    highs = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
+    lows = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
+    closes_p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
+    tr = torch.max(torch.max(highs - lows, (highs - closes_p).abs()), (lows - closes_p).abs())
     atr_pct = (tr.mean(dim=0) / today_open.clamp(min=1e-8)).clamp(0.003, 0.15)
 
     closes_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, C]
@@ -76,43 +74,14 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx, dates=None):
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
 
-    # Candlestick features
-    prev_range = (prev_high - prev_low).clamp(min=1e-8)
-    close_position = (prev_close - prev_low) / prev_range
-    body_ratio = (prev_close - prev_open).abs() / prev_range
-
-    vol_20d = ohlcv[day_idx - 20:day_idx, tradeable_idx, V]
-    vol_avg = vol_20d.mean(dim=0).clamp(min=1.0)
-    vol_yesterday = ohlcv[day_idx - 1, tradeable_idx, V]
-    vol_ratio = (vol_yesterday / vol_avg).clamp(0.1, 5.0)
-
-    gap_atr = gap / atr_pct.clamp(min=1e-6)
-
-    # NEW: Market breadth — fraction of tradeable stocks that were up yesterday
-    prev_day_close = ohlcv[day_idx - 1, tradeable_idx, C]
-    prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
-    breadth = (prev_day_close > prev_day_open).float().mean().item()
-
-    # NEW: Day of week (0=Mon, 4=Fri) encoded as sin/cos
-    if dates is not None and day_idx < len(dates):
-        dow = dates[day_idx].weekday()
-    else:
-        dow = 2  # default to Wednesday
-    dow_sin = np.sin(2 * np.pi * dow / 5)
-    dow_cos = np.cos(2 * np.pi * dow / 5)
-
     features = torch.stack([
         r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
         torch.full((N,), vix_val),
         torch.full((N,), spy_mom),
         rank_10d,
-        close_position, body_ratio, vol_ratio, gap_atr,
-        torch.full((N,), breadth),
-        torch.full((N,), dow_sin),
-        torch.full((N,), dow_cos),
     ], dim=1)
 
-    return features, atr_pct, vix_val * 30.0
+    return features, atr_pct, spy_mom, vix_val * 30.0
 
 
 def build_strategy(train_data):
@@ -120,7 +89,6 @@ def build_strategy(train_data):
     tradeable_idx = train_data["tradeable_indices"]
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
-    dates = train_data["dates"]
     D = ohlcv.shape[0]
 
     opens = ohlcv[:, tradeable_idx, O]
@@ -129,7 +97,7 @@ def build_strategy(train_data):
     min_day = 21
     X_list, y_list = [], []
     for d in range(min_day, D):
-        feats, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d, dates)
+        feats, _, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
         labels = (intraday > 0).float()
         X_list.append(feats)
@@ -168,7 +136,6 @@ def build_strategy(train_data):
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "all_tickers": all_tickers,
-        "dates": dates,
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
@@ -180,7 +147,6 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     all_tickers = strategy["all_tickers"]
-    dates = strategy["dates"]
     model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
@@ -190,9 +156,14 @@ def generate_orders(strategy, data, day_idx):
         return []
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
-    feats, atr_pct, vix = compute_features(
-        ohlcv, tradeable_idx, all_tickers, day_idx, dates
+    feats, atr_pct, spy_mom, vix = compute_features(
+        ohlcv, tradeable_idx, all_tickers, day_idx
     )
+
+    # BEAR MARKET FILTER: stay flat when SPY is in clear downtrend
+    if spy_mom < -0.02:
+        return []
+
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
@@ -201,8 +172,8 @@ def generate_orders(strategy, data, day_idx):
 
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    # Long only, moderate threshold
-    long_thresh = 0.53
+    # LONG ONLY with v11's proven threshold
+    long_thresh = 0.58
 
     candidates = []
     for i in range(n_tickers):
@@ -223,10 +194,8 @@ def generate_orders(strategy, data, day_idx):
     candidates = candidates[:5]
 
     weight_each = vol_scale / len(candidates)
-
-    # Very wide TP/SL — almost never trigger, pure close exit
-    stop_m = 3.0
-    target_m = 3.0
+    stop_m = 1.5
+    target_m = 2.0
 
     orders = []
     for (idx, _, op, ap) in candidates:
