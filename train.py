@@ -1,9 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-Pure NN with rich features and high-confidence thresholds.
-Richer features: range position, volume signals, multi-timeframe momentum,
-cross-sectional ranks. High selectivity (0.58/0.42) proven to work.
+Ensemble logistic regression: 5 linear models trained on random subsamples,
+averaged for robust predictions. Minimal overfitting risk.
+Uses v11's proven 11-feature set with high-confidence thresholds.
 
 Usage: uv run train.py
 """
@@ -16,97 +16,49 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from prepare import O, H, L, C, V, evaluate
+from prepare import O, H, L, C, evaluate
 
 t_start = time.time()
 torch.manual_seed(42)
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class IntradayPredictor(nn.Module):
-    def __init__(self, n_features):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_features, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-
-
 def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
+    """11-feature set from v11 (proven to generalize)."""
     N = len(tradeable_idx)
     prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
     today_open = ohlcv[day_idx, tradeable_idx, O]
 
-    # Multi-timeframe returns
     def ret(d):
         c = ohlcv[day_idx - d, tradeable_idx, C]
         return (prev_close - c) / c.clamp(min=1e-8)
-    r1, r3, r5, r10, r20 = ret(1), ret(3), ret(5), ret(10), ret(20)
 
-    # Gap
+    r1, r3, r5, r10, r20 = ret(1), ret(3), ret(5), ret(10), ret(20)
     gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
 
-    # ATR
     highs = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
     lows = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
     closes_p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
     tr = torch.max(torch.max(highs - lows, (highs - closes_p).abs()), (lows - closes_p).abs())
     atr_pct = (tr.mean(dim=0) / today_open.clamp(min=1e-8)).clamp(0.003, 0.15)
 
-    # Realized vol
     closes_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, C]
     log_rets = torch.log(closes_20[1:] / closes_20[:-1].clamp(min=1e-8))
     vol_20 = log_rets.std(dim=0).clamp(min=1e-6)
 
-    # Yesterday's range position: where did it close within its range?
-    yest_h = ohlcv[day_idx - 1, tradeable_idx, H]
-    yest_l = ohlcv[day_idx - 1, tradeable_idx, L]
-    yest_range = (yest_h - yest_l).clamp(min=1e-8)
-    range_pos = (prev_close - yest_l) / yest_range  # 0=low, 1=high
-
-    # Yesterday's range relative to ATR (narrow or wide day?)
-    range_vs_atr = yest_range / tr.mean(dim=0).clamp(min=1e-8)
-
-    # Volume: yesterday vs 20-day average
-    vol_yest = ohlcv[day_idx - 1, tradeable_idx, V]
-    vol_20_avg = ohlcv[day_idx - 20:day_idx, tradeable_idx, V].mean(dim=0).clamp(min=1)
-    vol_ratio = vol_yest / vol_20_avg
-
-    # Market-level features
     vix_idx = next((j for j, t in enumerate(all_tickers) if t == "^VIX"), None)
     spy_idx = all_tickers.index("SPY")
     vix_val = float(ohlcv[day_idx - 1, vix_idx, C]) / 30.0 if vix_idx else 0.5
-    spy_c = float(ohlcv[day_idx - 1, spy_idx, C])
-    spy_20 = float(ohlcv[day_idx - 20, spy_idx, C])
-    spy_5 = float(ohlcv[day_idx - 5, spy_idx, C])
-    spy_mom20 = (spy_c - spy_20) / spy_20
-    spy_mom5 = (spy_c - spy_5) / spy_5
+    spy_mom = (float(ohlcv[day_idx - 1, spy_idx, C]) - float(ohlcv[day_idx - 20, spy_idx, C])) / float(ohlcv[day_idx - 20, spy_idx, C])
 
-    # Cross-sectional ranks
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
-    rank_5d = r5.argsort().argsort().float()
-    rank_5d = (rank_5d / max(N - 1, 1) * 2 - 1)
 
     features = torch.stack([
-        r1, r3, r5, r10, r20,              # momentum
-        gap,                                 # overnight gap
-        atr_pct, vol_20,                     # volatility
-        range_pos,                           # range position
-        range_vs_atr,                        # range ratio
-        vol_ratio,                           # volume signal
-        torch.full((N,), vix_val),           # VIX
-        torch.full((N,), spy_mom20),         # SPY 20d
-        torch.full((N,), spy_mom5),          # SPY 5d
-        rank_10d, rank_5d,                   # cross-sectional ranks
+        r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
+        torch.full((N,), vix_val),
+        torch.full((N,), spy_mom),
+        rank_10d,
     ], dim=1)
 
     return features, atr_pct
@@ -138,39 +90,40 @@ def build_strategy(train_data):
     X_norm = (X - feat_mean) / feat_std
     y_binary = (y > 0).float()
 
-    # Sample weights: more recent data weighted higher
-    n_samples = X_norm.shape[0]
-    n_tickers = len(tickers)
-    n_days = n_samples // n_tickers
-    day_weights = torch.linspace(0.5, 1.0, n_days).repeat_interleave(n_tickers)
-    if len(day_weights) > n_samples:
-        day_weights = day_weights[:n_samples]
-    elif len(day_weights) < n_samples:
-        day_weights = torch.cat([day_weights, torch.ones(n_samples - len(day_weights))])
-
     n_features = X_norm.shape[1]
-    model = IntradayPredictor(n_features).to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    n_samples = X_norm.shape[0]
+    n_ensemble = 5
 
-    X_train = X_norm.to(dev)
-    y_train = y_binary.to(dev)
-    w_train = day_weights.to(dev)
+    # Train ensemble of linear models
+    models = []
+    for k in range(n_ensemble):
+        torch.manual_seed(42 + k)
+        # Bootstrap sample (80% of data)
+        sample_size = int(0.8 * n_samples)
+        indices = torch.randint(0, n_samples, (sample_size,))
 
-    batch_size = 2048
-    n_epochs = min(50, max(5, 300 * 1000 // n_samples))
+        model = nn.Linear(n_features, 1).to(dev)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2, weight_decay=1e-3)
+        criterion = nn.BCEWithLogitsLoss()
 
-    model.train()
-    for _ in range(n_epochs):
-        perm = torch.randperm(n_samples, device=dev)
-        for start in range(0, n_samples, batch_size):
-            idx = perm[start:min(start + batch_size, n_samples)]
-            pred = model(X_train[idx])
-            loss = (criterion(pred, y_train[idx]) * w_train[idx]).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-    model.eval()
+        X_sub = X_norm[indices].to(dev)
+        y_sub = y_binary[indices].to(dev)
+
+        batch_size = 4096
+        n_epochs = 100
+
+        model.train()
+        for _ in range(n_epochs):
+            perm = torch.randperm(sample_size, device=dev)
+            for start in range(0, sample_size, batch_size):
+                idx = perm[start:min(start + batch_size, sample_size)]
+                pred = model(X_sub[idx]).squeeze(-1)
+                loss = criterion(pred, y_sub[idx])
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        model.eval()
+        models.append(model)
 
     vix_idx = next((j for j, t in enumerate(all_tickers) if t == "^VIX"), None)
 
@@ -178,7 +131,7 @@ def build_strategy(train_data):
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "all_tickers": all_tickers,
-        "model": model,
+        "models": models,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
         "vix_idx": vix_idx,
@@ -190,7 +143,7 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     all_tickers = strategy["all_tickers"]
-    model = strategy["model"]
+    models = strategy["models"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
     vix_idx = strategy["vix_idx"]
@@ -199,12 +152,16 @@ def generate_orders(strategy, data, day_idx):
         return []
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
-
     feats, atr_pct = compute_features(ohlcv, tradeable_idx, all_tickers, day_idx)
-    feats_norm = (feats - feat_mean) / feat_std
+    feats_norm = ((feats - feat_mean) / feat_std).to(dev)
 
+    # Ensemble prediction: average probabilities
     with torch.no_grad():
-        probs = torch.sigmoid(model(feats_norm.to(dev))).cpu()
+        all_probs = []
+        for model in models:
+            logits = model(feats_norm).squeeze(-1)
+            all_probs.append(torch.sigmoid(logits))
+        probs = torch.stack(all_probs).mean(dim=0).cpu()
 
     vix = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx else 20.0
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
@@ -220,9 +177,9 @@ def generate_orders(strategy, data, day_idx):
         ap = float(atr_pct[i])
         confidence = abs(p - 0.5)
 
-        if p > 0.58:
+        if p > 0.56:
             candidates.append(("long", i, confidence, op, ap))
-        elif p < 0.42:
+        elif p < 0.44:
             candidates.append(("short", i, confidence, op, ap))
 
     if not candidates:
