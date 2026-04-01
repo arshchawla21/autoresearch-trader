@@ -1,9 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-Ensemble logistic regression: 5 linear models trained on random subsamples,
-averaged for robust predictions. Minimal overfitting risk.
-Uses v11's proven 11-feature set with high-confidence thresholds.
+v11-style NN with recent-data focus. Train on last 500 days only
+to avoid learning stale patterns. Same 64/32 architecture and 11 features.
+Slightly relaxed thresholds (0.56/0.44) for more trades.
 
 Usage: uv run train.py
 """
@@ -23,8 +23,24 @@ torch.manual_seed(42)
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+class IntradayPredictor(nn.Module):
+    def __init__(self, n_features):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_features, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+
 def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
-    """11-feature set from v11 (proven to generalize)."""
     N = len(tradeable_idx)
     prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
     today_open = ohlcv[day_idx, tradeable_idx, O]
@@ -74,9 +90,12 @@ def build_strategy(train_data):
     opens = ohlcv[:, tradeable_idx, O]
     closes = ohlcv[:, tradeable_idx, C]
 
+    # Only use recent data for training
     min_day = 21
+    train_start = max(min_day, D - 500)
+
     X_list, y_list = [], []
-    for d in range(min_day, D):
+    for d in range(train_start, D):
         feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
         X_list.append(feats)
@@ -91,39 +110,26 @@ def build_strategy(train_data):
     y_binary = (y > 0).float()
 
     n_features = X_norm.shape[1]
-    n_samples = X_norm.shape[0]
-    n_ensemble = 5
+    model = IntradayPredictor(n_features).to(dev)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    X_train = X_norm.to(dev)
+    y_train = y_binary.to(dev)
 
-    # Train ensemble of linear models
-    models = []
-    for k in range(n_ensemble):
-        torch.manual_seed(42 + k)
-        # Bootstrap sample (80% of data)
-        sample_size = int(0.8 * n_samples)
-        indices = torch.randint(0, n_samples, (sample_size,))
+    batch_size = 2048
+    n_samples = X_train.shape[0]
+    n_epochs = min(80, max(10, 500 * 1000 // n_samples))
 
-        model = nn.Linear(n_features, 1).to(dev)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2, weight_decay=1e-3)
-        criterion = nn.BCEWithLogitsLoss()
-
-        X_sub = X_norm[indices].to(dev)
-        y_sub = y_binary[indices].to(dev)
-
-        batch_size = 4096
-        n_epochs = 100
-
-        model.train()
-        for _ in range(n_epochs):
-            perm = torch.randperm(sample_size, device=dev)
-            for start in range(0, sample_size, batch_size):
-                idx = perm[start:min(start + batch_size, sample_size)]
-                pred = model(X_sub[idx]).squeeze(-1)
-                loss = criterion(pred, y_sub[idx])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-        model.eval()
-        models.append(model)
+    model.train()
+    for _ in range(n_epochs):
+        perm = torch.randperm(n_samples, device=dev)
+        for start in range(0, n_samples, batch_size):
+            idx = perm[start:min(start + batch_size, n_samples)]
+            loss = criterion(model(X_train[idx]), y_train[idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    model.eval()
 
     vix_idx = next((j for j, t in enumerate(all_tickers) if t == "^VIX"), None)
 
@@ -131,7 +137,7 @@ def build_strategy(train_data):
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
         "all_tickers": all_tickers,
-        "models": models,
+        "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
         "vix_idx": vix_idx,
@@ -143,7 +149,7 @@ def generate_orders(strategy, data, day_idx):
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
     all_tickers = strategy["all_tickers"]
-    models = strategy["models"]
+    model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
     vix_idx = strategy["vix_idx"]
@@ -153,15 +159,10 @@ def generate_orders(strategy, data, day_idx):
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
     feats, atr_pct = compute_features(ohlcv, tradeable_idx, all_tickers, day_idx)
-    feats_norm = ((feats - feat_mean) / feat_std).to(dev)
+    feats_norm = (feats - feat_mean) / feat_std
 
-    # Ensemble prediction: average probabilities
     with torch.no_grad():
-        all_probs = []
-        for model in models:
-            logits = model(feats_norm).squeeze(-1)
-            all_probs.append(torch.sigmoid(logits))
-        probs = torch.stack(all_probs).mean(dim=0).cpu()
+        probs = torch.sigmoid(model(feats_norm.to(dev))).cpu()
 
     vix = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx else 20.0
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
