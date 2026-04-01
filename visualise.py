@@ -70,44 +70,33 @@ def plot_stock_trades(data, result, ticker):
     test_start_idx = next(i for i, d in enumerate(data["dates"]) if d == test_dates[0])
     test_end_idx = test_start_idx + len(test_dates)
 
-    ohlcv = data["ohlcv"][test_start_idx:test_end_idx, tradeable_idx[j]].numpy()
-    prices_close = ohlcv[:, C]
-    prices_high = ohlcv[:, H]
-    prices_low = ohlcv[:, L]
+    d = dates[start:end]
+    price = ohlcv[start:end, tradeable_idx[j], C].numpy()
+    pos = weights[start:end, j].numpy()
+    fwd = fwd_ret[start:end, j].numpy()
+    raw_sig = signals["raw_signal"][start:end, j].numpy()
 
-    # Extract trades for this ticker
-    stock_daily_ret = np.zeros(len(test_dates))
-    entry_days, entry_prices, entry_dirs = [], [], []
-    exit_days, exit_prices = [], []
-    stop_hits, limit_hits, close_exits = 0, 0, 0
-    trade_returns = []
+    # Per-stock daily P&L (weight * forward return, with transaction costs)
+    N_trade = data["num_tradeable"]
+    turnover = np.zeros_like(pos)
+    turnover[1:] = np.abs(pos[1:] - pos[:-1])
+    tc = TRANSACTION_COST_BPS / 10000 * turnover
+    daily_pnl = pos * fwd - tc
 
-    for day_i, trades in enumerate(per_day):
-        for t in trades:
-            if t["ticker"] != ticker:
-                continue
-            stock_daily_ret[day_i] += t["weight"] * t["return"]
-            entry_days.append(day_i)
-            entry_prices.append(t["entry_price"])
-            entry_dirs.append(t["direction"])
-            exit_days.append(day_i)
-            exit_prices.append(t["exit_price"])
-            trade_returns.append(t["return"])
+    # Passive equal-weight baseline: hold this stock at 1/N weight (fair comparison)
+    passive_weight = 1.0 / N_trade
+    passive_pnl = passive_weight * fwd
 
-            if t["stop_hit"]:
-                stop_hits += 1
-            elif t["limit_hit"]:
-                limit_hits += 1
-            elif t["held_to_close"]:
-                close_exits += 1
+    # Cumulative returns
+    cum_strategy = np.cumprod(1 + daily_pnl) - 1
+    cum_passive = np.cumprod(1 + passive_pnl) - 1
+    buy_hold_ret = price / price[0] - 1
 
-    n_trades = len(trade_returns)
-    if n_trades == 0:
-        print(f"No trades found for {ticker} in this period.")
-        return
-
-    trade_returns = np.array(trade_returns)
-    cum_ret = np.cumprod(1 + stock_daily_ret) - 1
+    # Mark test boundary
+    if show_train:
+        test_date = dates[test_start]
+    else:
+        test_date = None
 
     # ── Plot ──────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(4, 1, figsize=(18, 20), sharex=False,
@@ -165,30 +154,35 @@ def plot_stock_trades(data, result, ticker):
 
     # Panel 3: Cumulative return
     ax = axes[2]
-    ax.plot(d, cum_ret * 100, color="#2ecc71", linewidth=1.8, label=f"{ticker} strategy")
-    buy_hold = prices_close / prices_close[0] - 1
-    ax.plot(d, buy_hold * 100, color="#3498db", linewidth=1.2, alpha=0.7, label="Buy & hold")
+    ax.plot(d, raw_sig, color="#8e44ad", linewidth=0.7, alpha=0.7)
+    ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
+    ax.set_ylabel("Signal", fontsize=11)
+    ax.set_title("Raw Composite Signal (pre-EMA)", fontsize=12, pad=8)
+
+    # Panel 4: Cumulative P&L — fair comparison at portfolio-weight scale
+    ax = axes[3]
+    ax.plot(d, cum_strategy * 100, color="#2ecc71", linewidth=1.8,
+            label=f"Strategy (active weight)")
+    ax.plot(d, cum_passive * 100, color="#f39c12", linewidth=1.2, alpha=0.7,
+            linestyle="--", label=f"Passive (1/{N_trade} = {passive_weight:.1%} weight)")
     ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
     ax.set_ylabel("Cumulative Return (%)", fontsize=11)
-    ax.set_title("Strategy vs Buy & Hold", fontsize=12, pad=8)
+    ax.set_title(f"Strategy vs Passive Equal-Weight — this stock's portfolio contribution", fontsize=12, pad=8)
     ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
-    ax.set_facecolor(bg_color)
-    ax.grid(True, alpha=0.15, linewidth=0.5)
+    # Secondary axis: 100% buy-and-hold for context
+    ax2 = ax.twinx()
+    ax2.plot(d, buy_hold_ret * 100, color="#3498db", linewidth=1.0, alpha=0.3)
+    ax2.set_ylabel(f"100% Buy & Hold (%)", fontsize=9, color="#3498db", alpha=0.5)
+    ax2.tick_params(axis="y", labelcolor="#3498db", labelsize=8)
 
-    # Panel 4: Trade outcome distribution
-    ax = axes[3]
-    ax.set_facecolor(bg_color)
-
-    # Left: histogram of trade returns
-    ax.hist(trade_returns * 100, bins=30, color="#3498db", alpha=0.6, edgecolor="#2c3e50", linewidth=0.5)
-    ax.axvline(0, color="#2c3e50", linewidth=1, alpha=0.5)
-    ax.axvline(trade_returns.mean() * 100, color="#e74c3c", linewidth=1.5, linestyle="--",
-               label=f"Mean: {trade_returns.mean()*100:.2f}%")
-    ax.set_xlabel("Trade Return (%)", fontsize=11)
-    ax.set_ylabel("Count", fontsize=11)
-    ax.set_title("Trade Return Distribution", fontsize=12, pad=8)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.15, linewidth=0.5)
+    # Panel 5: Daily P&L bars
+    ax = axes[4]
+    colors_bar = ["#2ecc71" if p >= 0 else "#e74c3c" for p in daily_pnl]
+    ax.bar(d, daily_pnl * 10000, color=colors_bar, alpha=0.6, width=1.5)
+    ax.axhline(0, color="#2c3e50", linewidth=0.5, alpha=0.3)
+    ax.set_ylabel("Daily P&L (bps)", fontsize=11)
+    ax.set_title("Daily P&L Contribution (basis points)", fontsize=12, pad=8)
+    ax.set_xlabel("Date", fontsize=11)
 
     # Date formatting for time-series panels
     for ax_ts in axes[:3]:
@@ -197,33 +191,33 @@ def plot_stock_trades(data, result, ticker):
         plt.setp(ax_ts.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
     # Stats annotation
-    win_rate = np.mean(trade_returns > 0) * 100
-    avg_win = trade_returns[trade_returns > 0].mean() * 100 if (trade_returns > 0).any() else 0
-    avg_loss = trade_returns[trade_returns <= 0].mean() * 100 if (trade_returns <= 0).any() else 0
-    total_ret = cum_ret[-1] * 100 if len(cum_ret) > 0 else 0
-    sr = stock_daily_ret
-    sharpe = float(np.sqrt(252) * sr.mean() / sr.std()) if sr.std() > 1e-10 else 0
+    test_mask = np.array([i >= (test_start - start) for i in range(len(d))])
+    if test_mask.any():
+        test_pnl = daily_pnl[test_mask]
+        test_passive = passive_pnl[test_mask]
+        test_sr = (test_pnl.mean() / test_pnl.std() * np.sqrt(252)) if test_pnl.std() > 1e-10 else 0
+        test_cum = np.prod(1 + test_pnl) - 1
+        passive_cum = np.prod(1 + test_passive) - 1
+        bh_cum = price[test_mask][-1] / price[test_mask][0] - 1
+        avg_pos = np.mean(np.abs(pos[test_mask]))
+        avg_turn = np.mean(turnover[test_mask])
 
-    stats_text = (
-        f"  {ticker} Trade Stats\n"
-        f"  ────────────────────────\n"
-        f"  Total trades:    {n_trades}\n"
-        f"  Win rate:        {win_rate:.1f}%\n"
-        f"  Avg winner:      {avg_win:+.2f}%\n"
-        f"  Avg loser:       {avg_loss:+.2f}%\n"
-        f"  ────────────────────────\n"
-        f"  Stop-loss hits:  {stop_hits}\n"
-        f"  Take-profit:     {limit_hits}\n"
-        f"  Held to close:   {close_exits}\n"
-        f"  ────────────────────────\n"
-        f"  Total return:    {total_ret:+.2f}%\n"
-        f"  Sharpe (ann.):   {sharpe:.2f}\n"
-        f"  Buy&hold:        {(buy_hold[-1])*100:+.2f}%"
-    )
-    fig.text(0.98, 0.98, stats_text, transform=fig.transFigure,
-             fontsize=9, verticalalignment="top", horizontalalignment="right",
-             fontfamily="monospace", bbox=dict(boxstyle="round,pad=0.5",
-             facecolor="white", edgecolor="#cccccc", alpha=0.9))
+        stats_text = (
+            f"Test period — {ticker}:\n"
+            f"  Strategy contribution: {test_cum*100:+.2f}%\n"
+            f"  Passive (1/{N_trade}):       {passive_cum*100:+.2f}%\n"
+            f"  Alpha vs passive:     {(test_cum - passive_cum)*100:+.2f}%\n"
+            f"  100% buy & hold:      {bh_cum*100:+.2f}%\n"
+            f"  ─────────────────────────\n"
+            f"  Sharpe (this stock):  {test_sr:.2f}\n"
+            f"  Avg |weight|:         {avg_pos:.4f} ({avg_pos*100:.1f}%)\n"
+            f"  Avg turnover:         {avg_turn:.4f}\n"
+            f"  Days long / short:    {np.sum(pos[test_mask] > 0.001)} / {np.sum(pos[test_mask] < -0.001)}"
+        )
+        fig.text(0.98, 0.98, stats_text, transform=fig.transFigure,
+                 fontsize=9, verticalalignment="top", horizontalalignment="right",
+                 fontfamily="monospace", bbox=dict(boxstyle="round,pad=0.5",
+                 facecolor="white", edgecolor="#cccccc", alpha=0.9))
 
     plt.tight_layout(rect=[0, 0, 0.82, 1])
     outfile = f"backtest_{ticker}.png"
