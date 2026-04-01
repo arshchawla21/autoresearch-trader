@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v21: NN Scalper — tight take-profits for high win rate.
-Radical change from v11: instead of wide TP (2x ATR) that rarely triggers,
-use tight TP (0.2x ATR) that triggers frequently. Trade many stocks
-with small positions. Goal: >50% win rate + positive daily returns.
+v22: Train on ACTUAL TRADE OUTCOMES, not close direction.
+Instead of predicting "will close > open?", predict "would a long trade
+with 0.5x ATR target / 1.5x ATR stop actually be profitable?"
+This aligns the training objective with the exact trading mechanics.
 
 Usage: uv run train.py
 """
@@ -22,6 +22,10 @@ from prepare import O, H, L, C, evaluate
 t_start = time.time()
 torch.manual_seed(42)
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Trading parameters — used in both training labels and inference
+TP_MULT = 0.5   # take-profit at 0.5x ATR
+SL_MULT = 1.5   # stop-loss at 1.5x ATR
 
 
 class IntradayPredictor(nn.Module):
@@ -83,22 +87,55 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     return features, atr_pct, vix_val * 30.0
 
 
+def simulate_long_trade(open_price, high, low, close, atr_pct):
+    """Simulate a long trade and return 1 if profitable, 0 if not."""
+    tp = open_price * (1 + atr_pct * TP_MULT)
+    sl = open_price * (1 - atr_pct * SL_MULT)
+
+    stop_hit = low <= sl
+    limit_hit = high >= tp
+
+    if stop_hit and limit_hit:
+        exit_price = tp if close > open_price else sl
+    elif stop_hit:
+        exit_price = sl
+    elif limit_hit:
+        exit_price = tp
+    else:
+        exit_price = close
+
+    return 1.0 if exit_price > open_price else 0.0
+
+
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"]
     tradeable_idx = train_data["tradeable_indices"]
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
     D = ohlcv.shape[0]
+    N = len(tradeable_idx)
 
     opens = ohlcv[:, tradeable_idx, O]
+    highs = ohlcv[:, tradeable_idx, H]
+    lows = ohlcv[:, tradeable_idx, L]
     closes = ohlcv[:, tradeable_idx, C]
 
     min_day = 21
     X_list, y_list = [], []
     for d in range(min_day, D):
-        feats, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
-        intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        labels = (intraday > 0).float()
+        feats, atr_pct, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+
+        # Compute ACTUAL long trade outcome for each stock
+        labels = torch.zeros(N)
+        for i in range(N):
+            op = float(opens[d, i])
+            if op <= 0:
+                continue
+            labels[i] = simulate_long_trade(
+                op, float(highs[d, i]), float(lows[d, i]),
+                float(closes[d, i]), float(atr_pct[i])
+            )
+
         X_list.append(feats)
         y_list.append(labels)
 
@@ -162,13 +199,14 @@ def generate_orders(strategy, data, day_idx):
 
     with torch.no_grad():
         logits = model(feats_norm.to(dev)).cpu()
-        probs = torch.sigmoid(logits)
+        probs = torch.sigmoid(logits)  # P(long trade profitable)
 
     vol_scale = 0.5 if vix > 35 else 0.7 if vix > 28 else 1.0
 
-    # Lower thresholds → more trades (scalping needs volume)
-    long_thresh = 0.54
-    short_thresh = 0.46
+    # High P → long (model says long trade will be profitable)
+    # Low P → short (model says long trade will NOT be profitable → short should work)
+    long_thresh = 0.58
+    short_thresh = 0.42
 
     candidates = []
     for i in range(n_tickers):
@@ -179,22 +217,17 @@ def generate_orders(strategy, data, day_idx):
         ap = float(atr_pct[i])
 
         if p > long_thresh:
-            candidates.append(("long", i, p - 0.5, op, ap))
+            candidates.append(("long", i, p - long_thresh, op, ap))
         elif p < short_thresh:
-            candidates.append(("short", i, 0.5 - p, op, ap))
+            candidates.append(("short", i, short_thresh - p, op, ap))
 
     if not candidates:
         return []
 
-    # Take top 8 by confidence — scalp many positions
     candidates.sort(key=lambda x: x[2], reverse=True)
-    candidates = candidates[:8]
+    candidates = candidates[:5]
 
     weight_each = vol_scale / len(candidates)
-
-    # SCALPING: tight take-profit, moderate stop
-    tp_mult = 0.25   # 0.25x ATR target — very tight
-    sl_mult = 1.0    # 1.0x ATR stop — moderate protection
 
     orders = []
     for (direction, idx, _, op, ap) in candidates:
@@ -203,16 +236,16 @@ def generate_orders(strategy, data, day_idx):
                 "ticker": tickers[idx],
                 "direction": "long",
                 "weight": weight_each,
-                "stop_loss": op * (1 - ap * sl_mult),
-                "take_profit": op * (1 + ap * tp_mult),
+                "stop_loss": op * (1 - ap * SL_MULT),
+                "take_profit": op * (1 + ap * TP_MULT),
             })
         else:
             orders.append({
                 "ticker": tickers[idx],
                 "direction": "short",
                 "weight": weight_each,
-                "stop_loss": op * (1 + ap * sl_mult),
-                "take_profit": op * (1 - ap * tp_mult),
+                "stop_loss": op * (1 + ap * SL_MULT),
+                "take_profit": op * (1 - ap * TP_MULT),
             })
 
     return orders
