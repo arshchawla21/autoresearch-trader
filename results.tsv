@@ -2,3 +2,4 @@ tag	sharpe_ratio	total_return	max_drawdown	win_rate	avg_daily_trades	build_secon
 v1-baseline	-1.8777	-12.99	-16.91	35.7	2.9	0.0	0.4	0.0	Default mean-reversion z>1.5, 1x ATR stop, 1.5x ATR target, top 5 equal-weight
 v2-momentum-long	-1.2996	-10.07	-18.36	44.6	2.8	0.0	0.5	0.0	Long-only momentum: 5d+10d+gap signal, 0.8 ATR stop, 2.0 ATR target, top 3
 v3-gap-fade	-1.2283	-8.47	-13.93	48.8	4.9	0.0	0.5	0.0	Gap-fade: buy gap-down sell gap-up, 1x ATR stop, 0.5x gap target, top 5
+v4-hold-to-close	-1.8699	-10.17	-13.80	45.6	1.0	0.0	0.1	0.0	Long SPY every day, wide stops, hold to close. 10bps cost kills daily returns.

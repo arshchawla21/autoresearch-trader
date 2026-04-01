@@ -1,8 +1,8 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-Gap-fade strategy: buy stocks that gap down at open, sell stocks that gap up.
-Intraday mean-reversion on overnight gaps is a well-documented anomaly.
+Hold-to-close: long SPY every day with very wide stops (never triggered).
+Captures the daily equity premium. Minimal strategy, maximum simplicity.
 
 Usage: uv run train.py
 """
@@ -26,13 +26,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ---------------------------------------------------------------------------
 
 def build_strategy(train_data):
-    ohlcv = train_data["ohlcv"]
-    tradeable_idx = train_data["tradeable_indices"]
     tickers = train_data["tradeable_tickers"]
-
+    tradeable_idx = train_data["tradeable_indices"]
     return {
         "tickers": tickers,
         "tradeable_idx": tradeable_idx,
+        "spy_idx": tickers.index("SPY"),
     }
 
 
@@ -40,83 +39,23 @@ def generate_orders(strategy, data, day_idx):
     ohlcv = data["ohlcv"]
     tickers = strategy["tickers"]
     tradeable_idx = strategy["tradeable_idx"]
+    spy_i = strategy["spy_idx"]
 
-    if day_idx < 15:
+    if day_idx < 2:
         return []
 
-    today_open = ohlcv[day_idx, tradeable_idx, O]
-    prev_close = ohlcv[day_idx - 1, tradeable_idx, C]
-
-    # Compute ATR over last 14 days
-    highs = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
-    lows = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
-    closes_atr = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
-    tr = torch.max(
-        torch.max(highs - lows, (highs - closes_atr).abs()),
-        (lows - closes_atr).abs()
-    )
-    atr = tr.mean(dim=0)
-    atr_pct = (atr / today_open.clamp(min=1e-8)).clamp(min=0.003, max=0.10)
-
-    # Gap = (open - prev_close) / prev_close
-    gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
-
-    n_tickers = len(tickers)
-    candidates = []
-
-    for i in range(n_tickers):
-        open_price = float(today_open[i])
-        if open_price <= 0 or np.isnan(open_price):
-            continue
-
-        g = float(gap[i])
-        atr_p = float(atr_pct[i])
-
-        # Gap down > 0.3% -> buy (expect intraday reversion)
-        if g < -0.003:
-            stop_pct = atr_p * 1.0
-            target_pct = abs(g) * 0.5  # target partial gap fill
-            target_pct = max(target_pct, atr_p * 0.5)
-            candidates.append({
-                "ticker": tickers[i],
-                "direction": "long",
-                "signal_strength": abs(g),
-                "stop_loss": open_price * (1 - stop_pct),
-                "take_profit": open_price * (1 + target_pct),
-            })
-        # Gap up > 0.3% -> short (expect intraday reversion)
-        elif g > 0.003:
-            stop_pct = atr_p * 1.0
-            target_pct = abs(g) * 0.5
-            target_pct = max(target_pct, atr_p * 0.5)
-            candidates.append({
-                "ticker": tickers[i],
-                "direction": "short",
-                "signal_strength": abs(g),
-                "stop_loss": open_price * (1 + stop_pct),
-                "take_profit": open_price * (1 - target_pct),
-            })
-
-    if not candidates:
+    open_price = float(ohlcv[day_idx, tradeable_idx[spy_i], O])
+    if open_price <= 0 or np.isnan(open_price):
         return []
 
-    # Sort by gap size (larger gaps = stronger signal), take top 5
-    candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
-    candidates = candidates[:5]
-
-    weight_each = 1.0 / len(candidates)
-
-    orders = []
-    for c in candidates:
-        orders.append({
-            "ticker": c["ticker"],
-            "direction": c["direction"],
-            "weight": weight_each,
-            "stop_loss": c["stop_loss"],
-            "take_profit": c["take_profit"],
-        })
-
-    return orders
+    # Set stops extremely wide — effectively hold to close
+    return [{
+        "ticker": "SPY",
+        "direction": "long",
+        "weight": 1.0,
+        "stop_loss": open_price * 0.90,    # 10% below — never hit intraday
+        "take_profit": open_price * 1.10,   # 10% above — never hit intraday
+    }]
 
 
 # ---------------------------------------------------------------------------
