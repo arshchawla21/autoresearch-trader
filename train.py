@@ -1,9 +1,9 @@
 """
-v25-weighted+asymm: Cross-sectional L/S MR with magnitude weighting + asymmetric SL/TP.
+v26-multi-lookback: Cross-sectional L/S MR with blended multi-lookback signal.
 
-Two improvements over v23:
-1. Weight positions by return magnitude (bigger deviation = more weight)
-2. Asymmetric SL/TP: wider TP (0.7%) vs SL (0.5%) to let winners run
+Instead of a single lookback, blend 1-bar and 5-bar returns for ranking.
+Short-term (1-bar) captures immediate overreaction.
+Medium-term (5-bar) captures sustained drift that's likely to revert.
 """
 
 import time
@@ -13,11 +13,10 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
-SL_PCT = 0.005   # 0.5% stop
-TP_PCT = 0.007   # 0.7% take profit (let winners run)
+SL_PCT = 0.005
+TP_PCT = 0.005
 N_LONG = 2
 N_SHORT = 2
-LOOKBACK = 5
 
 
 def build_strategy(train_data):
@@ -28,7 +27,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < LOOKBACK + 1:
+    if bar_idx < 6:
         return []
 
     tickers = strategy["tickers"]
@@ -41,49 +40,48 @@ def generate_orders(strategy, data, bar_idx):
     opens = ohlcv_np[bar_idx, tidx_np, O]
     closes = ohlcv_np[:bar_idx, tidx_np, C]
 
-    ret = (closes[-1] - closes[-1 - LOOKBACK]) / np.maximum(np.abs(closes[-1 - LOOKBACK]), 1e-8)
+    # Blend 1-bar and 5-bar returns (equal weight)
+    ret1 = (closes[-1] - closes[-2]) / np.maximum(np.abs(closes[-2]), 1e-8)
+    ret5 = (closes[-1] - closes[-6]) / np.maximum(np.abs(closes[-6]), 1e-8)
 
-    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
+    # Normalize each to z-scores before blending (different scales)
+    def zscore(x):
+        m = np.nanmean(x)
+        s = np.nanstd(x)
+        return (x - m) / max(s, 1e-8)
+
+    signal = zscore(ret1) + zscore(ret5)
+
+    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(signal)
     valid_idx = np.where(valid_mask)[0]
     if len(valid_idx) < N_LONG + N_SHORT:
         return []
 
-    valid_rets = ret[valid_idx]
-    sorted_indices = np.argsort(valid_rets)
+    valid_signal = signal[valid_idx]
+    sorted_indices = np.argsort(valid_signal)
 
     long_picks = valid_idx[sorted_indices[:N_LONG]]
     short_picks = valid_idx[sorted_indices[-N_SHORT:]]
 
-    # Magnitude-based weighting within each side
-    long_mags = np.abs(ret[long_picks])
-    short_mags = np.abs(ret[short_picks])
-
-    total_mag = long_mags.sum() + short_mags.sum()
-    if total_mag < 1e-10:
-        # Equal weight fallback
-        w_long = np.full(N_LONG, 0.5 / N_LONG)
-        w_short = np.full(N_SHORT, 0.5 / N_SHORT)
-    else:
-        w_long = 0.5 * long_mags / long_mags.sum()
-        w_short = 0.5 * short_mags / short_mags.sum()
+    w = 1.0 / (N_LONG + N_SHORT)
 
     orders = []
-    for i, idx in enumerate(long_picks):
+    for idx in long_picks:
         op = float(opens[idx])
         orders.append({
             "ticker": tickers[idx],
             "direction": "long",
-            "weight": float(w_long[i]),
+            "weight": w,
             "stop_loss": op * (1 - SL_PCT),
             "take_profit": op * (1 + TP_PCT),
         })
 
-    for i, idx in enumerate(short_picks):
+    for idx in short_picks:
         op = float(opens[idx])
         orders.append({
             "ticker": tickers[idx],
             "direction": "short",
-            "weight": float(w_short[i]),
+            "weight": w,
             "stop_loss": op * (1 + SL_PCT),
             "take_profit": op * (1 - TP_PCT),
         })
