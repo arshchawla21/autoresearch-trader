@@ -1,9 +1,8 @@
 """
-v4-meanrev-optimized: Optimized mean-reversion with VIX filter and adaptive stops.
+v5-rsi-meanrev: RSI-based mean-reversion. Trade only at extremes.
 
-Hypothesis: mean-reversion works better with (1) more diversification (5 stocks),
-(2) tighter TP relative to SL for higher win rate, (3) VIX filter to avoid
-trading during panic periods, and (4) longer lookback for stronger signals.
+Hypothesis: RSI identifies overbought/oversold better than raw momentum.
+Only trade when RSI < 30 (buy) or RSI > 70 (sell). Wider TP for bigger wins.
 """
 
 import os
@@ -15,11 +14,30 @@ from prepare import O, H, L, C, V, evaluate
 t_start = time.time()
 
 
+def compute_rsi(closes, period=14):
+    """Compute RSI for each stock. closes shape: (T, N)"""
+    T, N = closes.shape
+    rsi = np.full((T, N), 50.0)  # neutral default
+
+    for t in range(period + 1, T):
+        window = closes[t - period:t + 1]
+        deltas = np.diff(window, axis=0)
+        gains = np.maximum(deltas, 0)
+        losses = np.maximum(-deltas, 0)
+
+        avg_gain = np.mean(gains, axis=0)
+        avg_loss = np.mean(losses, axis=0)
+
+        rs = avg_gain / np.maximum(avg_loss, 1e-10)
+        rsi[t] = 100 - 100 / (1 + rs)
+
+    return rsi
+
+
 def build_strategy(train_data):
-    """Compute per-stock volatility stats and VIX index."""
+    """Compute ATR and precompute RSI on training data."""
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
-    midx = train_data["macro_indices"].numpy()
 
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
@@ -28,71 +46,65 @@ def build_strategy(train_data):
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
 
-    # Find VIX index in macro tickers
-    all_tickers = train_data["all_tickers"]
-    vix_idx = None
-    for i, t in enumerate(all_tickers):
-        if t == "^VIX":
-            vix_idx = i
-            break
-
     return {
         "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
         "avg_atr_pct": avg_atr_pct,
-        "vix_idx": vix_idx,
     }
 
 
 def generate_orders(strategy, data, bar_idx):
-    """Mean-reversion with VIX filter and tighter risk management."""
-    lookback = 8
-    if bar_idx < lookback + 1:
+    """Trade based on RSI extremes."""
+    rsi_period = 14
+    if bar_idx < rsi_period + 2:
         return []
 
     tickers = strategy["tickers"]
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
-    vix_idx = strategy["vix_idx"]
 
-    # VIX filter: don't trade if VIX is very high (panic)
-    if vix_idx is not None:
-        vix_close = float(ohlcv[bar_idx - 1, vix_idx, C])
-        if vix_close > 30:
-            return []
+    # Compute RSI on recent history
+    closes = ohlcv[bar_idx - rsi_period - 1:bar_idx, tidx, C].numpy()
+    deltas = np.diff(closes, axis=0)
+    gains = np.maximum(deltas, 0)
+    losses = np.maximum(-deltas, 0)
+    avg_gain = np.mean(gains, axis=0)
+    avg_loss = np.mean(losses, axis=0)
+    rs = avg_gain / np.maximum(avg_loss, 1e-10)
+    rsi = 100 - 100 / (1 + rs)
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
-    current_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    momentum = (current_close - past_close) / np.maximum(past_close, 1e-8)
-
-    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
+    valid = np.where((opens > 0) & ~np.isnan(opens))[0]
     if len(valid) == 0:
         return []
 
-    # Pick top 5 stocks with strongest moves to fade
-    abs_mom = np.abs(momentum[valid])
-    top_k = min(5, len(valid))
-    top_indices = valid[np.argsort(-abs_mom)[:top_k]]
-
     orders = []
-    weight = 1.0 / top_k
+    candidates = []
 
-    for idx in top_indices:
+    for idx in valid:
+        r = float(rsi[idx])
+        if r < 30:
+            candidates.append((idx, "long", 30 - r))  # more extreme = stronger signal
+        elif r > 70:
+            candidates.append((idx, "short", r - 70))
+
+    if not candidates:
+        return []
+
+    # Sort by signal strength, take top 3
+    candidates.sort(key=lambda x: -x[2])
+    top = candidates[:3]
+    weight = 1.0 / len(top)
+
+    for idx, direction, strength in top:
         ticker = tickers[idx]
         op = float(opens[idx])
-        mom = float(momentum[idx])
         atr = float(avg_atr[idx])
 
-        if abs(mom) < 0.0015:
-            continue
-
-        direction = "short" if mom > 0 else "long"
-
-        # Tighter: 1.2x ATR stop, 1.0x ATR take-profit (higher win rate)
-        sl_dist = max(atr * 1.2, 0.002) * op
-        tp_dist = max(atr * 1.0, 0.0015) * op
+        # Wider TP: 2.5x ATR, SL: 1.5x ATR
+        sl_dist = max(atr * 1.5, 0.002) * op
+        tp_dist = max(atr * 2.5, 0.004) * op
 
         if direction == "long":
             sl = op - sl_dist
