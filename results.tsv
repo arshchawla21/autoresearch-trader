@@ -44,3 +44,5 @@ v47-huber-ensemble-3	0.5299	1.64	-3.68	51.6	20.0	0.0	15.0	27.0	3-model Huber ens
 v48-huber-opt-stops	0.9001	2.47	-3.10	51.8	20.0	0.0	33.7	26.9	NEW BEST! v44 + per-slice stop calibration (grid search SL/TP on recent 125d). Sharpe >0.90!
 v49-huber-vix-opt	0.7376	1.71	-2.87	51.9	20.0	0.0	94.8	26.9	v48 + VIX scaling + finer grid. VIX scaling keeps hurting returns.
 v50-asym-ls-search	0.8333	2.34	-3.28	51.6	20.0	0.0	107.0	26.9	v48 + asymmetric L/S count search. More search dims = more overfitting. Worse than v48.
+v51-linear-huber-opt	0.4786	0.97	-4.02	51.2	20.0	0.0	30.7	24.6	Linear model + Huber. NN nonlinearity is essential — linear gets ~half the signal.
+v52-rank-targets-opt	0.8194	2.60	-3.42	52.2	20.0	0.0	33.9	26.9	Cross-sectional rank targets + opt stops. Highest return (2.60%) but lower Sharpe than v48.
