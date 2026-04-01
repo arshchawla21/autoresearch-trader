@@ -1,11 +1,12 @@
 """
-v17-atr-normalized: Rank stocks by momentum/ATR (z-score-like selection).
+v18-bollinger-fade: Fade Bollinger Band breakouts.
 
-Hypothesis: normalizing momentum by ATR selects stocks with the most
-unusual moves relative to their typical volatility, not just the biggest
-absolute movers. A 0.5% move in XLU is more extreme than 0.5% in TSLA.
+Hypothesis: when a stock's last close breaks outside its 10-bar Bollinger
+Bands (2 std devs), it's overextended and likely to revert. This is a
+cleaner signal than raw momentum because it's context-aware (accounts for
+recent volatility regime).
 
-Uses v9 stops (0.7x/4.0x ATR), 2-bar lookback.
+Uses v9 stops (0.7x/4.0x ATR).
 """
 
 import os
@@ -33,7 +34,8 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < 3:
+    bb_period = 10
+    if bar_idx < bb_period + 1:
         return []
 
     tickers = strategy["tickers"]
@@ -42,27 +44,37 @@ def generate_orders(strategy, data, bar_idx):
     avg_atr = strategy["avg_atr_pct"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    past_close = ohlcv[bar_idx - 2, tidx, C].numpy()
-    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
 
-    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
+    # Bollinger bands: 10-bar SMA +/- 2 std devs
+    recent_closes = ohlcv[bar_idx - bb_period:bar_idx, tidx, C].numpy()  # (10, N)
+    sma = np.mean(recent_closes, axis=0)
+    std = np.std(recent_closes, axis=0)
+    upper = sma + 2 * std
+    lower = sma - 2 * std
+
+    last_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+
+    valid = np.where((opens > 0) & ~np.isnan(opens) & (std > 1e-8))[0]
     if len(valid) == 0:
         return []
 
-    # Normalize by ATR: how many ATRs did the stock move?
-    atr_norm = np.abs(momentum[valid]) / np.maximum(avg_atr[valid], 1e-8)
-    best = valid[np.argmax(atr_norm)]
+    # Z-score: how far outside the bands
+    z_scores = (last_close - sma) / np.maximum(std, 1e-8)
 
-    mom = float(momentum[best])
-    if abs(mom) < 0.0003:
+    # Pick the most extreme z-score
+    abs_z = np.abs(z_scores[valid])
+    best = valid[np.argmax(abs_z)]
+    z = float(z_scores[best])
+
+    if abs(z) < 1.5:  # only trade when reasonably extreme
         return []
 
     ticker = tickers[best]
     op = float(opens[best])
     atr = float(avg_atr[best])
 
-    direction = "short" if mom > 0 else "long"
+    # Fade: if z > 0 (above SMA), short; if z < 0, long
+    direction = "short" if z > 0 else "long"
 
     sl_dist = max(atr * 0.7, 0.001) * op
     tp_dist = max(atr * 4.0, 0.005) * op
