@@ -1,11 +1,12 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v41: NN + gap-fade hybrid L10/S10.
-Combine v37's NN cross-sectional approach with gap-fade signals as extra
-features. The NN learns when gap-fading works vs when momentum continues.
-Also add: high-low range features, multi-day gap patterns, sector momentum.
-Bigger network (256->128->64) to handle richer feature set.
+v43: Recency-weighted NN + optimized stops via training-set search.
+Two changes from v37:
+1. Exponentially upweight recent training samples (halflife=252 days)
+2. Search for optimal SL/TP multipliers on training data
+This should make the model more adaptive to recent market conditions
+and calibrate stops better per-slice.
 
 Usage: uv run train.py
 """
@@ -29,15 +30,12 @@ class Net(nn.Module):
     def __init__(self, n_features):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_features, 256),
-            nn.ReLU(),
-            nn.Dropout(0.15),
-            nn.Linear(256, 128),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
             nn.Dropout(0.15),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.10),
+            nn.Dropout(0.15),
             nn.Linear(64, 1),
         )
 
@@ -60,19 +58,16 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     r1, r3, r5, r10, r20 = ret(1), ret(3), ret(5), ret(10), ret(20)
     gap = (today_open - prev_close) / prev_close.clamp(min=1e-8)
 
-    # ATR
     highs_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, H]
     lows_14 = ohlcv[day_idx - 14:day_idx, tradeable_idx, L]
     closes_14p = ohlcv[day_idx - 15:day_idx - 1, tradeable_idx, C]
     tr = torch.max(torch.max(highs_14 - lows_14, (highs_14 - closes_14p).abs()), (lows_14 - closes_14p).abs())
     atr_pct = (tr.mean(dim=0) / today_open.clamp(min=1e-8)).clamp(0.003, 0.15)
 
-    # Volatility
     closes_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, C]
     log_rets = torch.log(closes_20[1:] / closes_20[:-1].clamp(min=1e-8))
     vol_20 = log_rets.std(dim=0).clamp(min=1e-6)
 
-    # Market features
     vix_idx = next((j for j, t in enumerate(all_tickers) if t == "^VIX"), None)
     spy_idx = all_tickers.index("SPY")
     vix_val = float(ohlcv[day_idx - 1, vix_idx, C]) / 30.0 if vix_idx else 0.5
@@ -82,60 +77,34 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     spy_mom = (spy_c - spy_20) / spy_20
     spy_mom5 = (spy_c - spy_5) / spy_5
 
-    # Cross-sectional ranks
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
     rank_5d = r5.argsort().argsort().float()
     rank_5d = (rank_5d / max(N - 1, 1) * 2 - 1)
-    rank_1d = r1.argsort().argsort().float()
-    rank_1d = (rank_1d / max(N - 1, 1) * 2 - 1)
 
-    # Candlestick features
     prev_range = (prev_high - prev_low).clamp(min=1e-8)
     close_position = (prev_close - prev_low) / prev_range
     body_ratio = (prev_close - prev_open).abs() / prev_range
 
-    # Volume features
     vol_20d = ohlcv[day_idx - 20:day_idx, tradeable_idx, V]
     vol_avg = vol_20d.mean(dim=0).clamp(min=1.0)
     vol_yesterday = ohlcv[day_idx - 1, tradeable_idx, V]
     vol_ratio = (vol_yesterday / vol_avg).clamp(0.1, 5.0)
 
-    # Gap features (NEW - from v40 insight)
     gap_atr = gap / atr_pct.clamp(min=1e-6)
 
-    # Multi-day gap pattern: was yesterday also a gap?
-    prev_prev_close = ohlcv[day_idx - 2, tradeable_idx, C]
-    yesterday_gap = (prev_open - prev_prev_close) / prev_prev_close.clamp(min=1e-8)
-    yesterday_gap_atr = yesterday_gap / atr_pct.clamp(min=1e-6)
-
-    # Intraday range ratio: yesterday's range vs ATR (expansion/contraction)
-    range_vs_atr = prev_range / (atr_pct * today_open).clamp(min=1e-8)
-
-    # Previous day return (open to close)
-    prev_oc_ret = (prev_close - prev_open) / prev_open.clamp(min=1e-8)
-
-    # Breadth
     prev_day_close = ohlcv[day_idx - 1, tradeable_idx, C]
     prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
     breadth = (prev_day_close > prev_day_open).float().mean().item()
-
-    # Distance from 20d high/low
-    highs_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, H].max(dim=0).values
-    lows_20 = ohlcv[day_idx - 20:day_idx, tradeable_idx, L].min(dim=0).values
-    range_20 = (highs_20 - lows_20).clamp(min=1e-8)
-    pos_in_range = (prev_close - lows_20) / range_20
 
     features = torch.stack([
         r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
         torch.full((N,), vix_val),
         torch.full((N,), spy_mom),
         torch.full((N,), spy_mom5),
-        rank_10d, rank_5d, rank_1d,
-        close_position, body_ratio, vol_ratio,
-        gap_atr, yesterday_gap_atr, range_vs_atr, prev_oc_ret,
+        rank_10d, rank_5d,
+        close_position, body_ratio, vol_ratio, gap_atr,
         torch.full((N,), breadth),
-        pos_in_range,
     ], dim=1)
 
     return features, atr_pct
@@ -147,6 +116,7 @@ def build_strategy(train_data):
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
     D = ohlcv.shape[0]
+    N = len(tradeable_idx)
 
     opens = ohlcv[:, tradeable_idx, O]
     closes = ohlcv[:, tradeable_idx, C]
@@ -167,10 +137,17 @@ def build_strategy(train_data):
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
+    # Recency weights: exponential decay with halflife of 252 trading days
+    n_days = D - min_day
+    day_indices = torch.arange(n_days).unsqueeze(1).expand(-1, N).reshape(-1).float()
+    halflife = 252.0
+    decay = torch.exp(-torch.log(torch.tensor(2.0)) * (n_days - 1 - day_indices) / halflife)
+    # Normalize so mean weight = 1
+    sample_weights = (decay / decay.mean()).to(dev)
+
     n_features = X_norm.shape[1]
     model = Net(n_features).to(dev)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
     X_train = X_norm.to(dev)
     y_train = y.to(dev)
 
@@ -178,13 +155,15 @@ def build_strategy(train_data):
     n_samples = X_train.shape[0]
     n_epochs = min(60, max(10, 400 * 1000 // n_samples))
 
+    bce = nn.BCEWithLogitsLoss(reduction='none')
     model.train()
     for _ in range(n_epochs):
         perm = torch.randperm(n_samples, device=dev)
         for start in range(0, n_samples, batch_size):
             idx = perm[start:min(start + batch_size, n_samples)]
             logits = model(X_train[idx])
-            loss = criterion(logits, y_train[idx])
+            loss_per_sample = bce(logits, y_train[idx])
+            loss = (loss_per_sample * sample_weights[idx]).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
