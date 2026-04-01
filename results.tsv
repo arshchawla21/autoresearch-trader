@@ -7,3 +7,5 @@ v5-mom-follow	-4.9008	-0.0092	-0.0163	0.484	25.88	0.0	0.0	0	Follow momentum - wr
 v6-long-short	12.7178	0.0092	-0.0021	0.575	28.00	0.0	0.0	0	Market-neutral L/S all stocks - NEW BEST
 v7-ls-momweight	7.2556	0.0097	-0.0028	0.497	26.93	0.0	0.0	0	L/S mom-weighted - equal weight better
 v8-ls-1bar	11.3930	0.0086	-0.0034	0.582	28.00	0.0	0.0	0	L/S 1-bar lookback - slightly worse than 2-bar
+v9-wide-tp	4.7738	0.0234	-0.0194	0.490	1.00	0.0	0.0	0	Concentrated 4x ATR TP
+v10-no-stop	5.7809	0.0319	-0.0269	0.529	1.00	0.0	0.0	0	No SL, tight TP - highest return so far
