@@ -1,11 +1,9 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v52: Cross-sectional rank targets + Huber loss + optimized stops.
-Instead of predicting raw intraday returns, predict the cross-sectional
-percentile rank of each stock's intraday return within the day's universe.
-This is perfectly aligned with L10/S10 construction — we literally want
-to rank stocks, so we should train on ranks. Removes market-wide noise.
+v54: v48 with BatchNorm instead of Dropout + lower LR + more epochs.
+BatchNorm can improve regression quality by normalizing activations.
+Also: lr=5e-4 (half of v48) with 50% more epochs for smoother convergence.
 
 Usage: uv run train.py
 """
@@ -30,11 +28,11 @@ class Net(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_features, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.15),
             nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.15),
             nn.Linear(64, 1),
         )
 
@@ -158,7 +156,6 @@ def build_strategy(train_data):
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
     D = ohlcv.shape[0]
-    N = len(tradeable_idx)
 
     opens = ohlcv[:, tradeable_idx, O]
     closes = ohlcv[:, tradeable_idx, C]
@@ -168,11 +165,9 @@ def build_strategy(train_data):
     for d in range(min_day, D):
         feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        # Cross-sectional rank: convert to percentile [-1, 1]
-        ranks = intraday.argsort().argsort().float()
-        ranks = ranks / max(N - 1, 1) * 2 - 1  # scale to [-1, 1]
+        intraday = intraday.clamp(-0.10, 0.10)
         X_list.append(feats)
-        y_list.append(ranks)
+        y_list.append(intraday)
 
     X = torch.cat(X_list, dim=0)
     y = torch.cat(y_list, dim=0)
@@ -181,20 +176,20 @@ def build_strategy(train_data):
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
-    # Ranks are already normalized to [-1, 1], no need for further normalization
-    y_mean = 0.0
-    y_std = 1.0
+    y_mean = y.mean()
+    y_std = y.std().clamp(min=1e-8)
+    y_norm = (y - y_mean) / y_std
 
     n_features = X_norm.shape[1]
     model = Net(n_features).to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
     criterion = nn.HuberLoss(delta=1.0)
     X_train = X_norm.to(dev)
-    y_train = y.to(dev)
+    y_train = y_norm.to(dev)
 
     batch_size = 2048
     n_samples = X_train.shape[0]
-    n_epochs = min(60, max(10, 400 * 1000 // n_samples))
+    n_epochs = min(90, max(15, 600 * 1000 // n_samples))
 
     model.train()
     for _ in range(n_epochs):
@@ -209,6 +204,7 @@ def build_strategy(train_data):
     model.eval()
 
     # Calibrate stops
+    N = len(tradeable_idx)
     cal_start = max(min_day, D - 125)
     best_sharpe = -999
     best_sl, best_tp = 1.5, 2.5
@@ -220,7 +216,8 @@ def build_strategy(train_data):
                 feats, atr = compute_features(ohlcv, tradeable_idx, all_tickers, d)
                 feats_n = (feats - feat_mean) / feat_std
                 with torch.no_grad():
-                    pr = model(feats_n.to(dev)).cpu()
+                    pn = model(feats_n.to(dev)).cpu()
+                    pr = pn * y_std + y_mean
 
                 ret = simulate_day(
                     pr,
@@ -248,8 +245,8 @@ def build_strategy(train_data):
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
-        "y_mean": y_mean,
-        "y_std": y_std,
+        "y_mean": float(y_mean),
+        "y_std": float(y_std),
         "sl_mult": best_sl,
         "tp_mult": best_tp,
     }
@@ -263,6 +260,8 @@ def generate_orders(strategy, data, day_idx):
     model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
+    y_mean = strategy["y_mean"]
+    y_std = strategy["y_std"]
     sl_mult = strategy["sl_mult"]
     tp_mult = strategy["tp_mult"]
     n_tickers = len(tickers)
@@ -277,14 +276,15 @@ def generate_orders(strategy, data, day_idx):
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
-        pred = model(feats_norm.to(dev)).cpu()
+        pred_norm = model(feats_norm.to(dev)).cpu()
+        pred_ret = pred_norm * y_std + y_mean
 
     scored = []
     for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0 or np.isnan(op):
             continue
-        r = float(pred[i])
+        r = float(pred_ret[i])
         ap = float(atr_pct[i])
         scored.append((i, r, op, ap))
 

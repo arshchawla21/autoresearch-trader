@@ -46,3 +46,5 @@ v49-huber-vix-opt	0.7376	1.71	-2.87	51.9	20.0	0.0	94.8	26.9	v48 + VIX scaling + 
 v50-asym-ls-search	0.8333	2.34	-3.28	51.6	20.0	0.0	107.0	26.9	v48 + asymmetric L/S count search. More search dims = more overfitting. Worse than v48.
 v51-linear-huber-opt	0.4786	0.97	-4.02	51.2	20.0	0.0	30.7	24.6	Linear model + Huber. NN nonlinearity is essential — linear gets ~half the signal.
 v52-rank-targets-opt	0.8194	2.60	-3.42	52.2	20.0	0.0	33.9	26.9	Cross-sectional rank targets + opt stops. Highest return (2.60%) but lower Sharpe than v48.
+v53-mse-opt-stops	0.6371	1.67	-3.30	52.3	20.0	0.0	33.7	26.9	MSE loss instead of Huber. Worse — Huber's robustness helps even with clipped targets.
+v54-batchnorm-lowlr	0.3782	1.13	-3.65	50.9	20.0	0.0	38.0	26.9	BatchNorm + lower LR. Much worse — BN stats go stale in walk-forward. Dropout wins.
