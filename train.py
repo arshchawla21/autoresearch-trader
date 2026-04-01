@@ -1,11 +1,11 @@
 """
-v12-sector-divergence: Trade stock-vs-sector divergence.
+v13-trend-aligned-fade: Only fade short-term moves when they're against the trend.
 
-Hypothesis: when a stock moves differently from its sector ETF over the last
-2 bars, it tends to revert toward the sector. This is pairs-trading logic
-with economic rationale — sector correlation is mean-reverting.
+Hypothesis: a pullback within an uptrend (short-term dip in longer-term rally)
+reverts more reliably than fading a move in the trend's direction. This uses
+a 20-bar trend filter with 1-bar mean-reversion signal.
 
-Still uses v9 stops (0.7x/4.0x ATR).
+Economic rationale: trend pullbacks have institutional buyers/sellers as support.
 """
 
 import os
@@ -16,20 +16,10 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
-# Stock -> sector ETF mapping
-SECTOR_MAP = {
-    "AAPL": "XLK", "MSFT": "XLK", "GOOGL": "XLK", "META": "XLK", "NVDA": "XLK",
-    "AMZN": "XLY", "TSLA": "XLY", "HD": "XLY",
-    "JPM": "XLF", "V": "XLF", "MA": "XLF", "BAC": "XLF",
-    "JNJ": "XLV", "UNH": "XLV",
-    "PG": "XLP",
-}
-
 
 def build_strategy(train_data):
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
-    tickers = train_data["tradeable_tickers"]
 
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
@@ -37,81 +27,72 @@ def build_strategy(train_data):
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
 
-    # Build ticker -> index in tradeable array
-    ticker_to_tidx = {t: i for i, t in enumerate(tickers)}
-
     return {
-        "tickers": tickers,
+        "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
         "avg_atr_pct": avg_atr_pct,
-        "ticker_to_tidx": ticker_to_tidx,
     }
 
 
 def generate_orders(strategy, data, bar_idx):
-    lookback = 2
-    if bar_idx < lookback + 1:
+    trend_lookback = 20
+    if bar_idx < trend_lookback + 1:
         return []
 
     tickers = strategy["tickers"]
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
-    t2i = strategy["ticker_to_tidx"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
-    curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    returns = (curr_close - past_close) / np.maximum(past_close, 1e-8)
 
-    # Compute divergence: stock return minus sector ETF return
-    best_score = 0
-    best_idx = None
-    best_direction = None
+    # Short-term signal: 1-bar open-to-close
+    prev_open = ohlcv[bar_idx - 1, tidx, O].numpy()
+    prev_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    short_mom = (prev_close - prev_open) / np.maximum(prev_open, 1e-8)
 
-    for stock, sector_etf in SECTOR_MAP.items():
-        if stock not in t2i or sector_etf not in t2i:
-            continue
-        si = t2i[stock]
-        ei = t2i[sector_etf]
+    # Longer-term trend: 20-bar return
+    trend_start = ohlcv[bar_idx - trend_lookback, tidx, C].numpy()
+    trend_end = ohlcv[bar_idx - 1, tidx, C].numpy()
+    trend = (trend_end - trend_start) / np.maximum(trend_start, 1e-8)
 
-        if np.isnan(returns[si]) or np.isnan(returns[ei]):
-            continue
-        if opens[si] <= 0 or np.isnan(opens[si]):
-            continue
-
-        divergence = returns[si] - returns[ei]
-        score = abs(divergence)
-
-        if score > best_score:
-            best_score = score
-            best_idx = si
-            # Fade the divergence: if stock outperformed sector, short it
-            best_direction = "short" if divergence > 0 else "long"
-
-    if best_idx is None or best_score < 0.001:
+    valid = np.where(
+        (opens > 0) & ~np.isnan(opens) & ~np.isnan(short_mom) & ~np.isnan(trend)
+    )[0]
+    if len(valid) == 0:
         return []
 
-    # Also check the plain mean-reversion signal as fallback
-    valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(returns))[0]
-    abs_ret = np.abs(returns[valid])
-    plain_best = valid[np.argmax(abs_ret)]
-    plain_score = float(abs_ret[np.argmax(abs_ret)])
+    # Score: prefer stocks where short-term move is AGAINST the trend
+    # i.e., trend is up but short-term dipped (or vice versa)
+    scores = np.zeros(len(tickers))
+    for i in valid:
+        sm = short_mom[i]
+        tr = trend[i]
+        # Against trend: signs differ
+        if sm * tr < 0:
+            # Signal strength: magnitude of short-term move
+            scores[i] = abs(sm)
+        # else: short-term is with trend — skip (score stays 0)
 
-    # Use whichever signal is stronger
-    if plain_score > best_score * 1.5:
-        best_idx = plain_best
-        mom = float(returns[plain_best])
-        best_direction = "short" if mom > 0 else "long"
+    best = np.argmax(scores)
+    if scores[best] < 0.0003:
+        # No good against-trend signal; fall back to plain mean-reversion
+        abs_mom = np.abs(short_mom[valid])
+        best = valid[np.argmax(abs_mom)]
+        if abs_mom[np.argmax(abs_mom)] < 0.0005:
+            return []
 
-    ticker = tickers[best_idx]
-    op = float(opens[best_idx])
-    atr = float(avg_atr[best_idx])
+    ticker = tickers[best]
+    op = float(opens[best])
+    mom = float(short_mom[best])
+    atr = float(avg_atr[best])
+
+    direction = "short" if mom > 0 else "long"
 
     sl_dist = max(atr * 0.7, 0.001) * op
     tp_dist = max(atr * 4.0, 0.005) * op
 
-    if best_direction == "long":
+    if direction == "long":
         sl = op - sl_dist
         tp = op + tp_dist
     else:
@@ -120,7 +101,7 @@ def generate_orders(strategy, data, bar_idx):
 
     return [{
         "ticker": ticker,
-        "direction": best_direction,
+        "direction": direction,
         "weight": 1.0,
         "stop_loss": sl,
         "take_profit": tp,
