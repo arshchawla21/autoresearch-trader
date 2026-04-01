@@ -1,8 +1,8 @@
 """
-v3-meanrev-all: Fade 2-bar momentum on ALL stocks every bar. Zero fees.
+v5-momentum-follow: FOLLOW momentum instead of fading. All stocks, every bar.
 
-Hypothesis: 2-bar close-to-close mean-reversion worked well before.
-With zero fees, trade all 28 stocks every bar weighted by signal strength.
+Hypothesis: maybe this market regime trends more than it reverts.
+Trade with the direction of 2-bar momentum on all stocks.
 """
 
 import time
@@ -63,7 +63,8 @@ def generate_orders(strategy, data, bar_idx):
         mom = float(momentum[idx])
         atr = float(avg_atr[idx])
 
-        direction = "short" if mom > 0 else "long"
+        # FOLLOW momentum (not fade)
+        direction = "long" if mom > 0 else "short"
 
         sl_dist = max(atr * 0.7, 0.001) * op
         tp_dist = max(atr * 1.0, 0.0015) * op
