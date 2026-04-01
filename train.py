@@ -1,11 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v31: Refined core-satellite.
-Core: SPY long every day (0.3 weight) in bull/sideways.
+v32: v30 with wider SPY core stops.
+Core: SPY long every day (0.3 weight) with very wide stops (never triggers).
 Satellite: selective NN picks (0.58 threshold, up to 0.7 weight) in bull.
-Bear (<-4%): COMPLETELY FLAT (no core, no satellites).
-Mild bear (-4% to -2%): SPY core at 0.15, no satellites.
+Bear filter: reduced core, no satellites.
 
 Usage: uv run train.py
 """
@@ -182,12 +181,10 @@ def generate_orders(strategy, data, day_idx):
     spy_op = float(today_open[spy_ti])
     spy_atr = float(atr_pct[spy_ti])
     if spy_op > 0 and not np.isnan(spy_op):
-        # Bear market management
-        if spy_mom < -0.04:
-            return []  # Completely flat in severe bear
+        # Reduce core in bear markets (same as v30)
         core_weight = 0.3 * vol_scale
         if spy_mom < -0.02:
-            core_weight = 0.15 * vol_scale  # Reduced core in mild bear
+            core_weight *= 0.3  # ~0.09 weight in bear
         elif spy_mom < 0:
             core_weight *= 0.7  # ~0.21 in mild downturn
 
@@ -195,8 +192,8 @@ def generate_orders(strategy, data, day_idx):
             "ticker": "SPY",
             "direction": "long",
             "weight": core_weight,
-            "stop_loss": spy_op * (1 - spy_atr * 2.0),
-            "take_profit": spy_op * (1 + spy_atr * 3.0),
+            "stop_loss": spy_op * (1 - spy_atr * 5.0),   # Very wide — never triggers
+            "take_profit": spy_op * (1 + spy_atr * 5.0), # Very wide — exits at close
         })
 
     # === SATELLITE: selective NN picks ===
