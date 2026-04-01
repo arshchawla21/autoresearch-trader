@@ -1,12 +1,11 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v30: Core-satellite strategy.
-Core: SPY long position every day (0.3 weight) — market drift for win rate.
-Satellite: selective NN picks when confident (0.58 threshold, up to 0.7 weight).
-Bear filter: no satellites in downtrend, reduced SPY core.
-
-Combines v28's daily exposure (win rate >50%) with v26's selectivity (Sharpe).
+v31: Refined core-satellite.
+Core: SPY long every day (0.3 weight) in bull/sideways.
+Satellite: selective NN picks (0.58 threshold, up to 0.7 weight) in bull.
+Bear (<-4%): COMPLETELY FLAT (no core, no satellites).
+Mild bear (-4% to -2%): SPY core at 0.15, no satellites.
 
 Usage: uv run train.py
 """
@@ -183,10 +182,12 @@ def generate_orders(strategy, data, day_idx):
     spy_op = float(today_open[spy_ti])
     spy_atr = float(atr_pct[spy_ti])
     if spy_op > 0 and not np.isnan(spy_op):
-        # Reduce core in bear markets
+        # Bear market management
+        if spy_mom < -0.04:
+            return []  # Completely flat in severe bear
         core_weight = 0.3 * vol_scale
         if spy_mom < -0.02:
-            core_weight *= 0.3  # ~0.09 weight in bear
+            core_weight = 0.15 * vol_scale  # Reduced core in mild bear
         elif spy_mom < 0:
             core_weight *= 0.7  # ~0.21 in mild downturn
 
