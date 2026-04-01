@@ -1,10 +1,9 @@
 """
-v20-high-freq: Trade every bar, fade the biggest mover. Zero fees = free trades.
+v21-multi-stock: Trade top 5 movers every bar with equal weight.
 
-Hypothesis: with no transaction costs, trading every single bar maximizes
-the number of mean-reversion samples. More trades = smoother equity curve
-= higher Sharpe. Use very tight TP (grab small profits quickly) since we're
-trading every 15 minutes. No threshold filter — always trade.
+Hypothesis: with zero fees, diversifying across multiple mean-reversion
+candidates per bar reduces single-stock risk and smooths returns.
+More trades per bar = lower variance = higher Sharpe.
 """
 
 import os
@@ -41,8 +40,6 @@ def generate_orders(strategy, data, bar_idx):
     avg_atr = strategy["avg_atr_pct"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-
-    # 2-bar momentum
     past_close = ohlcv[bar_idx - 2, tidx, C].numpy()
     curr_close = ohlcv[bar_idx - 1, tidx, C].numpy()
     momentum = (curr_close - past_close) / np.maximum(past_close, 1e-8)
@@ -51,34 +48,41 @@ def generate_orders(strategy, data, bar_idx):
     if len(valid) == 0:
         return []
 
-    # Always pick the biggest mover — no threshold
-    best = valid[np.argmax(np.abs(momentum[valid]))]
+    # Top 5 by absolute momentum
+    abs_mom = np.abs(momentum[valid])
+    top_k = min(5, len(valid))
+    top_indices = valid[np.argsort(-abs_mom)[:top_k]]
 
-    ticker = tickers[best]
-    op = float(opens[best])
-    mom = float(momentum[best])
-    atr = float(avg_atr[best])
+    weight = 1.0 / top_k
+    orders = []
 
-    direction = "short" if mom > 0 else "long"
+    for idx in top_indices:
+        ticker = tickers[idx]
+        op = float(opens[idx])
+        mom = float(momentum[idx])
+        atr = float(avg_atr[idx])
 
-    # Tight TP for quick scalps, reasonable SL
-    sl_dist = max(atr * 0.7, 0.001) * op
-    tp_dist = max(atr * 1.0, 0.0015) * op
+        direction = "short" if mom > 0 else "long"
 
-    if direction == "long":
-        sl = op - sl_dist
-        tp = op + tp_dist
-    else:
-        sl = op + sl_dist
-        tp = op - tp_dist
+        sl_dist = max(atr * 0.7, 0.001) * op
+        tp_dist = max(atr * 1.0, 0.0015) * op
 
-    return [{
-        "ticker": ticker,
-        "direction": direction,
-        "weight": 1.0,
-        "stop_loss": sl,
-        "take_profit": tp,
-    }]
+        if direction == "long":
+            sl = op - sl_dist
+            tp = op + tp_dist
+        else:
+            sl = op + sl_dist
+            tp = op - tp_dist
+
+        orders.append({
+            "ticker": ticker,
+            "direction": direction,
+            "weight": weight,
+            "stop_loss": sl,
+            "take_profit": tp,
+        })
+
+    return orders
 
 
 if __name__ == "__main__":
