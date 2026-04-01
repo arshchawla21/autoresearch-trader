@@ -1,21 +1,2 @@
 tag	sharpe_ratio	total_return	max_drawdown	win_rate	avg_daily_trades	build_seconds	total_seconds	peak_vram_mb	description
-v1-baseline	-7.9491	-0.0091	-0.0091	0.059	0.12	0.0	0.0	0	Random baseline
-v2-gap-fade	-6.5156	-0.0109	-0.0177	0.471	23.35	0.0	0.0	0	Fade open-vs-prev-close gap - noise
-v3-meanrev-all	5.9950	0.0113	-0.0083	0.490	25.88	0.0	0.0	0	2-bar MR all stocks mom-weighted
-v4-concentrated	5.0249	0.0233	-0.0187	0.497	1.00	0.0	0.0	0	Single biggest mover fade - diversified wins
-v5-mom-follow	-4.9008	-0.0092	-0.0163	0.484	25.88	0.0	0.0	0	Follow momentum - wrong direction
-v6-long-short	12.7178	0.0092	-0.0021	0.575	28.00	0.0	0.0	0	Market-neutral L/S all stocks - NEW BEST
-v7-ls-momweight	7.2556	0.0097	-0.0028	0.497	26.93	0.0	0.0	0	L/S mom-weighted - equal weight better
-v8-ls-1bar	11.3930	0.0086	-0.0034	0.582	28.00	0.0	0.0	0	L/S 1-bar lookback - slightly worse than 2-bar
-v9-wide-tp	4.7738	0.0234	-0.0194	0.490	1.00	0.0	0.0	0	Concentrated 4x ATR TP
-v10-no-stop	5.7809	0.0319	-0.0269	0.529	1.00	0.0	0.0	0	No SL, tight TP - highest return so far
-v11-ml-calibrated	5.3230	0.0062	-0.0075	0.549	10.00	2.6	2.6	0	NN direction pred, sym stops 50% bar range, 54.9% WR
-v12-ml-aggressive	-9.6823	-0.0156	-0.0219	0.438	5.00	4.1	4.1	0	Bigger model, more features - badly overfit (89% train, 44% eval)
-v13-ml-minimal	2.7681	0.0050	-0.0073	0.477	6.39	0.8	0.8	0	Tiny model, 7 features - barely learns, still <50% WR
-v14-hybrid-ls-ml	0.0074	0.0000	-0.0023	0.490	28.00	1.0	1.0	0	L/S base + ML weighting - ML just adds noise
-v15-ls-30pct	4.2835	0.0014	-0.0025	0.556	28.00	0.0	0.0	0	L/S 30% bar range stops - 55.6% WR
-v15b-ls-25pct	6.0418	0.0018	-0.0016	0.562	28.00	0.0	0.0	0	L/S 25% bar range - best WR 56.2%, sharpe=6.04
-v15c-ls-15pct	5.9735	0.0018	-0.0012	0.542	28.00	0.0	0.0	0	L/S 15% bar range - similar sharpe, lower WR
-v16-ls-asym	48.5452	0.0161	-0.0004	0.719	28.00	0.0	0.0	0	L/S asym SL=25% TP=35% - WR=71.9%!
-v17-ls-asym-tight	64.7892	0.0173	-0.0003	0.791	28.00	0.0	0.0	0	L/S asym SL=20% TP=30% - WR=79.1% BEST
-v18-ls-asym-wide	43.7191	0.0182	-0.0006	0.699	28.00	0.0	0.0	0	L/S asym SL=30% TP=45% - robust across ratios
+v19-selective-ml	-2.4506	-0.0071	-0.0171	0.242	1.20	1.5	1.5	0	1% SL/TP ML selective - base rate ~50%, model overfits
