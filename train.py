@@ -1,13 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v28: Always-invested daily long portfolio.
-Completely different paradigm: instead of predicting WHEN to trade,
-use the NN for stock SELECTION. Every day, go long the top 8 stocks
-ranked by NN probability. Always fully invested.
-
-Win rate = fraction of days portfolio rises (market drift + NN selection).
-This is a daily-rebalanced factor portfolio, not a threshold strategy.
+v29: Diversified portfolio with proper risk management.
+Combines v28's portfolio approach (for >50% win rate via diversification)
+with v11's stop/target mechanics (1.5x/2.0x ATR for better R:R).
+Bear market exposure reduction prevents catastrophic losses.
 
 Usage: uv run train.py
 """
@@ -195,9 +192,9 @@ def generate_orders(strategy, data, day_idx):
     # Equal weight across picks
     weight_each = total_exposure / len(top_picks)
 
-    # Wide stops — just catastrophe protection. Exits mostly at close.
-    stop_m = 2.0
-    target_m = 3.0
+    # v11's proven stop/target mechanics
+    stop_m = 1.5
+    target_m = 2.0
 
     orders = []
     for (idx, _, op, ap) in top_picks:
