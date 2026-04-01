@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v36: AGGRESSIVE zero-fee strategy. Max trades, max exposure.
-With 0 transaction costs, trade EVERYTHING with any signal.
-Go long top stocks, short bottom stocks. Full weight every day.
-NN classification + cross-sectional ranking. No selectivity needed.
+v37: Max exposure zero-fee strategy.
+Long top 10, short bottom 10 — trade nearly every stock every day.
+Wider targets (2.5x ATR) to let winners run. Bigger model.
+With zero fees, volume is FREE so maximize exposure.
 
 Usage: uv run train.py
 """
@@ -78,12 +78,13 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
 
-    # Candlestick features
+    rank_5d = r5.argsort().argsort().float()
+    rank_5d = (rank_5d / max(N - 1, 1) * 2 - 1)
+
     prev_range = (prev_high - prev_low).clamp(min=1e-8)
     close_position = (prev_close - prev_low) / prev_range
     body_ratio = (prev_close - prev_open).abs() / prev_range
 
-    # Volume
     vol_20d = ohlcv[day_idx - 20:day_idx, tradeable_idx, V]
     vol_avg = vol_20d.mean(dim=0).clamp(min=1.0)
     vol_yesterday = ohlcv[day_idx - 1, tradeable_idx, V]
@@ -91,7 +92,6 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
 
     gap_atr = gap / atr_pct.clamp(min=1e-6)
 
-    # Breadth
     prev_day_close = ohlcv[day_idx - 1, tradeable_idx, C]
     prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
     breadth = (prev_day_close > prev_day_open).float().mean().item()
@@ -101,12 +101,12 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
         torch.full((N,), vix_val),
         torch.full((N,), spy_mom),
         torch.full((N,), spy_mom5),
-        rank_10d,
+        rank_10d, rank_5d,
         close_position, body_ratio, vol_ratio, gap_atr,
         torch.full((N,), breadth),
     ], dim=1)
 
-    return features, atr_pct, spy_mom, vix_val * 30.0
+    return features, atr_pct
 
 
 def build_strategy(train_data):
@@ -122,7 +122,7 @@ def build_strategy(train_data):
     min_day = 21
     X_list, y_list = [], []
     for d in range(min_day, D):
-        feats, _, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+        feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
         labels = (intraday > 0).float()
         X_list.append(feats)
@@ -181,7 +181,7 @@ def generate_orders(strategy, data, day_idx):
         return []
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
-    feats, atr_pct, spy_mom, vix = compute_features(
+    feats, atr_pct = compute_features(
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
     feats_norm = (feats - feat_mean) / feat_std
@@ -189,10 +189,6 @@ def generate_orders(strategy, data, day_idx):
     with torch.no_grad():
         logits = model(feats_norm.to(dev)).cpu()
         probs = torch.sigmoid(logits)
-
-    # With zero fees, go ALL IN every day
-    # Long the top 5 highest-probability stocks
-    # Short the bottom 5 lowest-probability stocks
 
     scored = []
     for i in range(n_tickers):
@@ -208,8 +204,9 @@ def generate_orders(strategy, data, day_idx):
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    n_long = 5
-    n_short = 5
+    # Long top 10, short bottom 10 (may overlap if <20 stocks)
+    n_long = min(10, len(scored) // 2)
+    n_short = min(10, len(scored) // 2)
     longs = scored[:n_long]
     shorts = scored[-n_short:]
 
@@ -222,7 +219,7 @@ def generate_orders(strategy, data, day_idx):
             "direction": "long",
             "weight": weight_each,
             "stop_loss": op * (1 - ap * 1.5),
-            "take_profit": op * (1 + ap * 2.0),
+            "take_profit": op * (1 + ap * 2.5),
         })
 
     for (idx, _, op, ap) in shorts:
@@ -231,7 +228,7 @@ def generate_orders(strategy, data, day_idx):
             "direction": "short",
             "weight": weight_each,
             "stop_loss": op * (1 + ap * 1.5),
-            "take_profit": op * (1 - ap * 2.0),
+            "take_profit": op * (1 - ap * 2.5),
         })
 
     return orders
