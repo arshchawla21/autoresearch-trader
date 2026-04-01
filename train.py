@@ -204,13 +204,12 @@ def generate_orders(strategy, data, day_idx):
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # Long top 10, short bottom 10 (may overlap if <20 stocks)
-    n_long = min(10, len(scored) // 2)
-    n_short = min(10, len(scored) // 2)
-    longs = scored[:n_long]
-    shorts = scored[-n_short:]
+    # Long top half, short bottom half — trade EVERY stock
+    n_half = len(scored) // 2
+    longs = scored[:n_half]
+    shorts = scored[n_half:]
 
-    weight_each = 1.0 / (n_long + n_short)
+    weight_each = 1.0 / len(scored)
 
     orders = []
     for (idx, _, op, ap) in longs:
@@ -219,7 +218,7 @@ def generate_orders(strategy, data, day_idx):
             "direction": "long",
             "weight": weight_each,
             "stop_loss": op * (1 - ap * 1.5),
-            "take_profit": op * (1 + ap * 2.5),
+            "take_profit": op * (1 + ap * 3.0),
         })
 
     for (idx, _, op, ap) in shorts:
@@ -228,7 +227,7 @@ def generate_orders(strategy, data, day_idx):
             "direction": "short",
             "weight": weight_each,
             "stop_loss": op * (1 + ap * 1.5),
-            "take_profit": op * (1 - ap * 2.5),
+            "take_profit": op * (1 - ap * 3.0),
         })
 
     return orders
