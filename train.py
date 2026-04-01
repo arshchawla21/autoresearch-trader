@@ -1,12 +1,12 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v43: Recency-weighted NN + optimized stops via training-set search.
-Two changes from v37:
-1. Exponentially upweight recent training samples (halflife=252 days)
-2. Search for optimal SL/TP multipliers on training data
-This should make the model more adaptive to recent market conditions
-and calibrate stops better per-slice.
+v44: Return regression with Huber loss.
+Instead of classifying direction (binary), predict the actual intraday
+return. Rank stocks by predicted return for L10/S10. Huber loss is
+robust to outliers. This gives the model richer gradient signal —
+a +3% day and a +0.1% day both count as "up" in classification,
+but regression treats them differently.
 
 Usage: uv run train.py
 """
@@ -116,7 +116,6 @@ def build_strategy(train_data):
     tickers = train_data["tradeable_tickers"]
     all_tickers = train_data["all_tickers"]
     D = ohlcv.shape[0]
-    N = len(tradeable_idx)
 
     opens = ohlcv[:, tradeable_idx, O]
     closes = ohlcv[:, tradeable_idx, C]
@@ -126,9 +125,10 @@ def build_strategy(train_data):
     for d in range(min_day, D):
         feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        direction = (intraday > 0).float()
+        # Clip extreme returns for stability
+        intraday = intraday.clamp(-0.10, 0.10)
         X_list.append(feats)
-        y_list.append(direction)
+        y_list.append(intraday)
 
     X = torch.cat(X_list, dim=0)
     y = torch.cat(y_list, dim=0)
@@ -137,33 +137,29 @@ def build_strategy(train_data):
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
-    # Recency weights: exponential decay with halflife of 252 trading days
-    n_days = D - min_day
-    day_indices = torch.arange(n_days).unsqueeze(1).expand(-1, N).reshape(-1).float()
-    halflife = 252.0
-    decay = torch.exp(-torch.log(torch.tensor(2.0)) * (n_days - 1 - day_indices) / halflife)
-    # Normalize so mean weight = 1
-    sample_weights = (decay / decay.mean()).to(dev)
+    # Normalize targets
+    y_mean = y.mean()
+    y_std = y.std().clamp(min=1e-8)
+    y_norm = (y - y_mean) / y_std
 
     n_features = X_norm.shape[1]
     model = Net(n_features).to(dev)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    criterion = nn.HuberLoss(delta=1.0)
     X_train = X_norm.to(dev)
-    y_train = y.to(dev)
+    y_train = y_norm.to(dev)
 
     batch_size = 2048
     n_samples = X_train.shape[0]
     n_epochs = min(60, max(10, 400 * 1000 // n_samples))
 
-    bce = nn.BCEWithLogitsLoss(reduction='none')
     model.train()
     for _ in range(n_epochs):
         perm = torch.randperm(n_samples, device=dev)
         for start in range(0, n_samples, batch_size):
             idx = perm[start:min(start + batch_size, n_samples)]
-            logits = model(X_train[idx])
-            loss_per_sample = bce(logits, y_train[idx])
-            loss = (loss_per_sample * sample_weights[idx]).mean()
+            pred = model(X_train[idx])
+            loss = criterion(pred, y_train[idx])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -176,6 +172,8 @@ def build_strategy(train_data):
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
+        "y_mean": float(y_mean),
+        "y_std": float(y_std),
     }
 
 
@@ -187,6 +185,8 @@ def generate_orders(strategy, data, day_idx):
     model = strategy["model"]
     feat_mean = strategy["feat_mean"]
     feat_std = strategy["feat_std"]
+    y_mean = strategy["y_mean"]
+    y_std = strategy["y_std"]
     n_tickers = len(tickers)
 
     if day_idx < 21:
@@ -199,21 +199,23 @@ def generate_orders(strategy, data, day_idx):
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
-        logits = model(feats_norm.to(dev))
-        probs = torch.sigmoid(logits.cpu())
+        pred_norm = model(feats_norm.to(dev)).cpu()
+        # Convert back to return space
+        pred_ret = pred_norm * y_std + y_mean
 
     scored = []
     for i in range(n_tickers):
         op = float(today_open[i])
         if op <= 0 or np.isnan(op):
             continue
-        p = float(probs[i])
+        r = float(pred_ret[i])
         ap = float(atr_pct[i])
-        scored.append((i, p, op, ap))
+        scored.append((i, r, op, ap))
 
     if len(scored) < 10:
         return []
 
+    # Rank by predicted return: top 10 go long, bottom 10 go short
     scored.sort(key=lambda x: x[1], reverse=True)
 
     n_long = 10
