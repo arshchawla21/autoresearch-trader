@@ -1,10 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v37: Max exposure zero-fee strategy.
-Long top 10, short bottom 10 — trade nearly every stock every day.
-Wider targets (2.5x ATR) to let winners run. Bigger model.
-With zero fees, volume is FREE so maximize exposure.
+v39: Confidence-weighted L10/S10.
+Based on v37 (Sharpe=0.73). Instead of equal weight, allocate more
+capital to the NN's strongest signals. Positions weighted by |prob - 0.5|.
+Also: wider targets (3x ATR) and regression head to predict magnitude.
 
 Usage: uv run train.py
 """
@@ -24,21 +24,26 @@ torch.manual_seed(42)
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class IntradayPredictor(nn.Module):
+class DualHead(nn.Module):
+    """Classification head for direction + regression head for magnitude."""
     def __init__(self, n_features):
         super().__init__()
-        self.net = nn.Sequential(
+        self.shared = nn.Sequential(
             nn.Linear(n_features, 128),
             nn.ReLU(),
             nn.Dropout(0.15),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(0.15),
-            nn.Linear(64, 1),
         )
+        self.direction_head = nn.Linear(64, 1)
+        self.magnitude_head = nn.Linear(64, 1)
 
     def forward(self, x):
-        return self.net(x).squeeze(-1)
+        h = self.shared(x)
+        direction = self.direction_head(h).squeeze(-1)
+        magnitude = self.magnitude_head(h).squeeze(-1)
+        return direction, magnitude
 
 
 def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
@@ -77,7 +82,6 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
 
     rank_10d = r10.argsort().argsort().float()
     rank_10d = (rank_10d / max(N - 1, 1) * 2 - 1)
-
     rank_5d = r5.argsort().argsort().float()
     rank_5d = (rank_5d / max(N - 1, 1) * 2 - 1)
 
@@ -120,27 +124,36 @@ def build_strategy(train_data):
     closes = ohlcv[:, tradeable_idx, C]
 
     min_day = 21
-    X_list, y_list = [], []
+    X_list, y_dir_list, y_mag_list = [], [], []
     for d in range(min_day, D):
         feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        labels = (intraday > 0).float()
+        direction = (intraday > 0).float()
+        magnitude = intraday.abs().clamp(0, 0.10)  # clip magnitude
         X_list.append(feats)
-        y_list.append(labels)
+        y_dir_list.append(direction)
+        y_mag_list.append(magnitude)
 
     X = torch.cat(X_list, dim=0)
-    y = torch.cat(y_list, dim=0)
+    y_dir = torch.cat(y_dir_list, dim=0)
+    y_mag = torch.cat(y_mag_list, dim=0)
 
     feat_mean = X.mean(dim=0)
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
+    mag_mean = y_mag.mean()
+    mag_std = y_mag.std().clamp(min=1e-8)
+    y_mag_scaled = (y_mag - mag_mean) / mag_std
+
     n_features = X_norm.shape[1]
-    model = IntradayPredictor(n_features).to(dev)
+    model = DualHead(n_features).to(dev)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
+    bce = nn.BCEWithLogitsLoss()
+    mse = nn.MSELoss()
     X_train = X_norm.to(dev)
-    y_train = y.to(dev)
+    y_dir_train = y_dir.to(dev)
+    y_mag_train = y_mag_scaled.to(dev)
 
     batch_size = 2048
     n_samples = X_train.shape[0]
@@ -151,7 +164,8 @@ def build_strategy(train_data):
         perm = torch.randperm(n_samples, device=dev)
         for start in range(0, n_samples, batch_size):
             idx = perm[start:min(start + batch_size, n_samples)]
-            loss = criterion(model(X_train[idx]), y_train[idx])
+            dir_logits, mag_pred = model(X_train[idx])
+            loss = bce(dir_logits, y_dir_train[idx]) + 0.5 * mse(mag_pred, y_mag_train[idx])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -164,6 +178,8 @@ def build_strategy(train_data):
         "model": model,
         "feat_mean": feat_mean,
         "feat_std": feat_std,
+        "mag_mean": float(mag_mean),
+        "mag_std": float(mag_std),
     }
 
 
@@ -187,8 +203,9 @@ def generate_orders(strategy, data, day_idx):
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
-        logits = model(feats_norm.to(dev)).cpu()
-        probs = torch.sigmoid(logits)
+        dir_logits, mag_pred = model(feats_norm.to(dev))
+        dir_logits = dir_logits.cpu()
+        probs = torch.sigmoid(dir_logits)
 
     scored = []
     for i in range(n_tickers):
@@ -197,37 +214,43 @@ def generate_orders(strategy, data, day_idx):
             continue
         p = float(probs[i])
         ap = float(atr_pct[i])
-        scored.append((i, p, op, ap))
+        confidence = abs(p - 0.5)  # how far from 0.5 = confidence
+        scored.append((i, p, op, ap, confidence))
 
     if len(scored) < 10:
         return []
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # Long top half, short bottom half — trade EVERY stock
-    n_half = len(scored) // 2
-    longs = scored[:n_half]
-    shorts = scored[n_half:]
+    n_long = 10
+    n_short = 10
+    longs = scored[:n_long]
+    shorts = scored[-n_short:]
 
-    weight_each = 1.0 / len(scored)
+    # Confidence-weighted allocation
+    long_confs = [s[4] for s in longs]
+    short_confs = [s[4] for s in shorts]
+    total_conf = sum(long_confs) + sum(short_confs) + 1e-8
 
     orders = []
-    for (idx, _, op, ap) in longs:
+    for (idx, _, op, ap, conf) in longs:
+        w = conf / total_conf
         orders.append({
             "ticker": tickers[idx],
             "direction": "long",
-            "weight": weight_each,
+            "weight": w,
             "stop_loss": op * (1 - ap * 1.5),
-            "take_profit": op * (1 + ap * 3.0),
+            "take_profit": op * (1 + ap * 2.5),
         })
 
-    for (idx, _, op, ap) in shorts:
+    for (idx, _, op, ap, conf) in shorts:
+        w = conf / total_conf
         orders.append({
             "ticker": tickers[idx],
             "direction": "short",
-            "weight": weight_each,
+            "weight": w,
             "stop_loss": op * (1 + ap * 1.5),
-            "take_profit": op * (1 - ap * 3.0),
+            "take_profit": op * (1 - ap * 2.5),
         })
 
     return orders
