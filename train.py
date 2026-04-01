@@ -98,6 +98,10 @@ def generate_orders(strategy, data, day_idx):
     else:
         vol_scale = 1.0
 
+    # 5-day momentum for faster regime detection
+    close_5 = ohlcv[day_idx - 5, tradeable_idx, C]
+    mom_5d = (prev_close - close_5) / close_5.clamp(min=1e-8)
+
     # Build candidate lists with pullback filter
     long_candidates = []
     short_candidates = []
@@ -109,14 +113,16 @@ def generate_orders(strategy, data, day_idx):
         t = float(trend[i])
         r3 = float(ret_3d[i])
         ap = float(atr_pct[i])
+        m5 = float(mom_5d[i])
 
         # Long: positive trend + recent pullback (buy the dip)
-        if t > 0.01 and r3 < 0.0:
-            score = t * (1 + abs(r3) * 5)  # bigger dip in uptrend = better
+        # Require meaningful trend strength
+        if t > 0.015 and r3 < 0.002:
+            score = t * (1 + abs(r3) * 5)
             long_candidates.append((i, score, op, ap))
 
         # Short: negative trend + recent bounce (sell the rally)
-        if t < -0.01 and r3 > 0.0:
+        if t < -0.015 and r3 > -0.002:
             score = abs(t) * (1 + abs(r3) * 5)
             short_candidates.append((i, score, op, ap))
 
@@ -127,19 +133,15 @@ def generate_orders(strategy, data, day_idx):
     stop_m = 1.5
     target_m = 2.5
 
-    if spy_mom > 0.02:
-        # Uptrend: long-only from pullback candidates
+    # Use both SPY 20d momentum and 5d momentum for regime
+    spy_5d = float(ohlcv[day_idx - 1, spy_all_idx, C]) / float(ohlcv[day_idx - 5, spy_all_idx, C]) - 1
+
+    if spy_mom > 0.03 or (spy_mom > 0.01 and spy_5d > 0.01):
+        # Uptrend: long-only from pullback candidates (no fallback)
         picks = long_candidates[:4]
         if not picks:
-            # Fallback: top momentum even without pullback
-            ranked = trend.argsort(descending=True)
-            for j in range(min(4, n_tickers)):
-                idx = int(ranked[j])
-                op = float(today_open[idx])
-                ap = float(atr_pct[idx])
-                if op > 0 and not np.isnan(op):
-                    picks.append((idx, 0, op, ap))
-        w = vol_scale / max(len(picks), 1)
+            return []
+        w = vol_scale / len(picks)
         for (idx, _, op, ap) in picks:
             orders.append({
                 "ticker": tickers[idx],
@@ -149,18 +151,12 @@ def generate_orders(strategy, data, day_idx):
                 "take_profit": op * (1 + ap * target_m),
             })
 
-    elif spy_mom < -0.02:
-        # Downtrend: short-only from rally candidates
+    elif spy_mom < -0.03 or (spy_mom < -0.01 and spy_5d < -0.01):
+        # Downtrend: short-only (no fallback)
         picks = short_candidates[:4]
         if not picks:
-            ranked = trend.argsort()
-            for j in range(min(4, n_tickers)):
-                idx = int(ranked[j])
-                op = float(today_open[idx])
-                ap = float(atr_pct[idx])
-                if op > 0 and not np.isnan(op):
-                    picks.append((idx, 0, op, ap))
-        w = vol_scale / max(len(picks), 1)
+            return []
+        w = vol_scale / len(picks)
         for (idx, _, op, ap) in picks:
             orders.append({
                 "ticker": tickers[idx],
@@ -171,9 +167,9 @@ def generate_orders(strategy, data, day_idx):
             })
 
     else:
-        # Sideways: balanced from pullback candidates
-        longs = long_candidates[:2]
-        shorts = short_candidates[:2]
+        # Sideways/uncertain: balanced from pullback candidates
+        longs = long_candidates[:3]
+        shorts = short_candidates[:3]
         n_total = len(longs) + len(shorts)
         if n_total == 0:
             return []

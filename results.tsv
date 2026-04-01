@@ -3,3 +3,4 @@ v6-baseline-1bps	-1.8777	-12.99	-16.91	35.7	2.9	0.0	0.4	0.0	Original baseline re
 v7-xsec-momentum	-0.9032	-4.35	-9.78	47.7	6.0	0.0	15.0	0.0	Cross-sectional momentum L3/S3, calibrated stops, VIX scaling
 v8-regime-adaptive	-0.4291	-3.18	-13.45	49.4	4.0	0.0	0.3	0.0	SPY trend tilt: long-only in uptrend, short-only in downtrend, balanced in sideways. 2xATR stops.
 v9-multifactor-pullback	-0.3303	-1.91	-13.14	50.2	3.2	0.0	0.6	0.0	Buy-the-dip in uptrend, sell-the-rally in downtrend. 1.5x stop, 2.5x target. 8/19 positive.
+v10-refined-signals	-0.2181	-1.38	-12.06	45.5	3.2	0.0	0.6	0.0	No fallback, 5d regime, tighter thresholds, higher trend minimum. 10/19 positive.
