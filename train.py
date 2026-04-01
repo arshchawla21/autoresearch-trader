@@ -1,12 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v44: Return regression with Huber loss.
-Instead of classifying direction (binary), predict the actual intraday
-return. Rank stocks by predicted return for L10/S10. Huber loss is
-robust to outliers. This gives the model richer gradient signal —
-a +3% day and a +0.1% day both count as "up" in classification,
-but regression treats them differently.
+v46: v44 Huber regression + VIX-based position scaling.
+In high-VIX environments (>25), reduce position sizes to protect capital.
+In low-VIX (<15), full sizing. Linear interpolation between.
+Also try: tighter stops in high VIX, wider in low VIX.
 
 Usage: uv run train.py
 """
@@ -97,6 +95,9 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
     prev_day_open = ohlcv[day_idx - 1, tradeable_idx, O]
     breadth = (prev_day_close > prev_day_open).float().mean().item()
 
+    # Raw VIX value for position scaling (not normalized)
+    raw_vix = float(ohlcv[day_idx - 1, vix_idx, C]) if vix_idx else 15.0
+
     features = torch.stack([
         r1, r3, r5, r10, r20, gap, atr_pct, vol_20,
         torch.full((N,), vix_val),
@@ -107,7 +108,7 @@ def compute_features(ohlcv, tradeable_idx, all_tickers, day_idx):
         torch.full((N,), breadth),
     ], dim=1)
 
-    return features, atr_pct
+    return features, atr_pct, raw_vix
 
 
 def build_strategy(train_data):
@@ -123,9 +124,8 @@ def build_strategy(train_data):
     min_day = 21
     X_list, y_list = [], []
     for d in range(min_day, D):
-        feats, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
+        feats, _, _ = compute_features(ohlcv, tradeable_idx, all_tickers, d)
         intraday = (closes[d] - opens[d]) / opens[d].clamp(min=1e-8)
-        # Clip extreme returns for stability
         intraday = intraday.clamp(-0.10, 0.10)
         X_list.append(feats)
         y_list.append(intraday)
@@ -137,7 +137,6 @@ def build_strategy(train_data):
     feat_std = X.std(dim=0).clamp(min=1e-8)
     X_norm = (X - feat_mean) / feat_std
 
-    # Normalize targets
     y_mean = y.mean()
     y_std = y.std().clamp(min=1e-8)
     y_norm = (y - y_mean) / y_std
@@ -193,15 +192,27 @@ def generate_orders(strategy, data, day_idx):
         return []
 
     today_open = ohlcv[day_idx, tradeable_idx, O]
-    feats, atr_pct = compute_features(
+    feats, atr_pct, raw_vix = compute_features(
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
         pred_norm = model(feats_norm.to(dev)).cpu()
-        # Convert back to return space
         pred_ret = pred_norm * y_std + y_mean
+
+    # VIX-based position scaling: full at VIX<15, half at VIX>30, zero at VIX>40
+    if raw_vix < 15:
+        vix_scale = 1.0
+    elif raw_vix < 30:
+        vix_scale = 1.0 - 0.5 * (raw_vix - 15) / 15
+    elif raw_vix < 40:
+        vix_scale = 0.5 - 0.5 * (raw_vix - 30) / 10
+    else:
+        vix_scale = 0.0
+
+    if vix_scale < 0.05:
+        return []
 
     scored = []
     for i in range(n_tickers):
@@ -215,7 +226,6 @@ def generate_orders(strategy, data, day_idx):
     if len(scored) < 10:
         return []
 
-    # Rank by predicted return: top 10 go long, bottom 10 go short
     scored.sort(key=lambda x: x[1], reverse=True)
 
     n_long = 10
@@ -224,7 +234,7 @@ def generate_orders(strategy, data, day_idx):
     shorts = scored[-n_short:]
 
     total = n_long + n_short
-    w = 1.0 / total
+    w = vix_scale / total
 
     orders = []
     for (idx, _, op, ap) in longs:

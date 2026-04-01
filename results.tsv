@@ -38,3 +38,5 @@ v41-nn-deeper-gapfeats	0.3740	0.76	-3.59	51.0	20.0	0.0	12.3	34.3	Deeper NN (256-
 v42-hold-to-close	0.6343	1.42	-3.72	53.4	20.0	0.0	9.8	26.9	v37 with 10x ATR SL/TP (hold to close). Worse Sharpe — v37's asymmetric stops add value.
 v43-recency-weighted	0.6953	1.54	-3.86	51.8	20.0	0.0	9.9	27.1	v37 + exponential recency weighting (halflife=252d). Near-identical to v37. Recency is neutral.
 v44-huber-regression	0.8467	2.35	-3.20	51.7	20.0	0.0	9.6	26.9	NEW BEST! Huber regression predicting returns > BCE classification for ranking. +0.12 Sharpe, +45% return vs v37.
+v45-multitask-recency	0.5282	1.38	-3.80	51.1	20.0	0.0	10.7	27.7	Multi-task (Huber+BCE) + recency weighting. Worse — added complexity hurts pure regression.
+v46-huber-vix-scaling	0.8002	1.65	-2.52	50.7	19.7	0.0	9.6	26.9	v44 + VIX position scaling. Best drawdown ever (-2.52%) but returns drop. Capital protection vs returns tradeoff.
