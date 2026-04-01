@@ -1,14 +1,10 @@
 """
 Autoresearch-trader training script. Single-GPU, single-file.
 
-v33: v26's selectivity (Sharpe=0.54) + light SPY core (for win rate).
-v26 was best Sharpe but only 0.4 trades/day with 8.5% win rate.
-Add a SMALL SPY core (0.15 weight) on non-bear days to provide
-daily exposure without diluting the signal.
-
-In bear: flat (v26's proven approach).
-In bull with model signals: v26 satellites + SPY core.
-In bull without model signals: SPY core only.
+v34: v30 base (0.3 SPY core) with tighter satellite threshold (0.60).
+v30 achieved >50% win rate but only 0.40 Sharpe. Higher satellite
+threshold should improve Sharpe via fewer but better satellite picks.
+Core maintains win rate >50%.
 
 Usage: uv run train.py
 """
@@ -171,10 +167,6 @@ def generate_orders(strategy, data, day_idx):
         ohlcv, tradeable_idx, all_tickers, day_idx
     )
 
-    # BEAR FILTER: flat in downtrend (v26's proven approach)
-    if spy_mom < -0.02:
-        return []
-
     feats_norm = (feats - feat_mean) / feat_std
 
     with torch.no_grad():
@@ -185,20 +177,28 @@ def generate_orders(strategy, data, day_idx):
 
     orders = []
 
-    # === CORE: Light SPY position for daily exposure ===
+    # === CORE: SPY position every day (v30 approach) ===
     spy_op = float(today_open[spy_ti])
     spy_atr = float(atr_pct[spy_ti])
     if spy_op > 0 and not np.isnan(spy_op):
+        core_weight = 0.3 * vol_scale
+        if spy_mom < -0.02:
+            core_weight *= 0.3  # Reduced in bear
+        elif spy_mom < 0:
+            core_weight *= 0.7  # Reduced in mild downturn
         orders.append({
             "ticker": "SPY",
             "direction": "long",
-            "weight": 0.15 * vol_scale,
+            "weight": core_weight,
             "stop_loss": spy_op * (1 - spy_atr * 2.0),
             "take_profit": spy_op * (1 + spy_atr * 3.0),
         })
 
-    # === SATELLITE: v26's selective NN picks ===
-    satellite_budget = 0.85 * vol_scale
+    # === SATELLITE: selective NN picks (only in non-bear) ===
+    if spy_mom < -0.02:
+        return orders  # Core only in bear
+
+    satellite_budget = 0.70 * vol_scale
 
     candidates = []
     for i in range(n_tickers):
@@ -210,7 +210,7 @@ def generate_orders(strategy, data, day_idx):
         p = float(probs[i])
         ap = float(atr_pct[i])
 
-        if p > 0.58:  # v11/v26's proven threshold
+        if p > 0.60:  # Higher threshold for better quality satellites
             candidates.append((i, p, op, ap))
 
     if candidates:

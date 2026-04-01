@@ -27,3 +27,4 @@ v30-core-satellite	0.3958	0.77	-4.64	52.4	1.4	0.0	6.9	24.9	BREAKTHROUGH: SPY cor
 v31-refined-core-sat	0.3537	0.58	-4.74	46.2	1.3	0.0	6.8	24.9	Flat in severe bear, reduced core in mild bear. Worse than v30 — removed profitable bounce days.
 v32-wider-spy-stops	0.3592	0.62	-4.76	52.4	1.4	0.0	6.9	24.9	Same as v30 but wider SPY core stops (5x ATR). Slightly worse — v30 SPY stops provide useful protection.
 v33-v26-plus-spy-core	0.4949	1.13	-4.60	42.7	1.2	0.0	6.8	24.9	v26 selectivity + 0.15 SPY core. Great Sharpe but win rate 42.7% not >50%.
+v34-tighter-satellites	0.2040	0.40	-4.46	52.1	1.2	0.0	6.9	24.9	v30 with tighter satellite threshold (0.60). Sharpe dropped — too few satellites to drive alpha.
