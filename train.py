@@ -1,7 +1,7 @@
 """
-v7-1bar-lookback: Single stock, 1-bar lookback, full weight.
+v8-tight-sl: Tighter SL (1.0x ATR), wider TP (3.0x ATR).
 
-Hypothesis: even faster 1-bar lookback captures more immediate reversions.
+Hypothesis: tighter stop-loss cuts losses faster, wider TP lets winners run.
 """
 
 import os
@@ -61,8 +61,8 @@ def generate_orders(strategy, data, bar_idx):
 
     direction = "short" if mom > 0 else "long"
 
-    sl_dist = max(atr * 1.5, 0.002) * op
-    tp_dist = max(atr * 2.0, 0.003) * op
+    sl_dist = max(atr * 1.0, 0.0015) * op
+    tp_dist = max(atr * 3.0, 0.004) * op
 
     if direction == "long":
         sl = op - sl_dist
