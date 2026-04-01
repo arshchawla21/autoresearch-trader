@@ -1,9 +1,11 @@
 """
-v27-volscaled-stops: Cross-sectional L/S MR with per-stock volatility-scaled stops.
+v29-dual-tf: Dual-timeframe cross-sectional L/S MR.
 
-Instead of fixed 0.5% SL/TP, scale stops to each stock's recent volatility.
-Set SL/TP at 1.5x the stock's median bar range — so stops are proportional
-to how much that stock typically moves in 15 minutes.
+Run two independent strategies simultaneously:
+- lb=5, top/bottom 2 stocks (half weight)
+- lb=10, top/bottom 2 stocks (half weight, different picks preferred)
+
+Diversification across timeframes should reduce variance.
 """
 
 import time
@@ -13,10 +15,8 @@ from prepare import O, H, L, C, V, evaluate
 
 t_start = time.time()
 
-STOP_MULT = 1.5   # stops at 1.5x recent median bar range
-N_LONG = 2
-N_SHORT = 2
-LOOKBACK = 5
+SL_PCT = 0.005
+TP_PCT = 0.005
 
 
 def build_strategy(train_data):
@@ -27,7 +27,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < LOOKBACK + 11:
+    if bar_idx < 11:
         return []
 
     tickers = strategy["tickers"]
@@ -39,52 +39,56 @@ def generate_orders(strategy, data, bar_idx):
 
     opens = ohlcv_np[bar_idx, tidx_np, O]
     closes = ohlcv_np[:bar_idx, tidx_np, C]
-    highs = ohlcv_np[:bar_idx, tidx_np, H]
-    lows = ohlcv_np[:bar_idx, tidx_np, L]
 
-    ret = (closes[-1] - closes[-1 - LOOKBACK]) / np.maximum(np.abs(closes[-1 - LOOKBACK]), 1e-8)
-
-    # Per-stock median bar range over last 10 bars
-    ranges = (highs[-10:] - lows[-10:]) / np.maximum(np.abs(closes[-11:-1]), 1e-8)
-    med_range = np.median(ranges, axis=0)
-    stop_pct = med_range * STOP_MULT
-    stop_pct = np.clip(stop_pct, 0.001, 0.02)  # floor/cap at 0.1% to 2%
-
-    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(ret)
-    valid_idx = np.where(valid_mask)[0]
-    if len(valid_idx) < N_LONG + N_SHORT:
-        return []
-
-    valid_rets = ret[valid_idx]
-    sorted_indices = np.argsort(valid_rets)
-
-    long_picks = valid_idx[sorted_indices[:N_LONG]]
-    short_picks = valid_idx[sorted_indices[-N_SHORT:]]
-
-    w = 1.0 / (N_LONG + N_SHORT)
+    valid_mask = (opens > 0) & ~np.isnan(opens)
 
     orders = []
-    for idx in long_picks:
-        op = float(opens[idx])
-        sp = float(stop_pct[idx])
-        orders.append({
-            "ticker": tickers[idx],
-            "direction": "long",
-            "weight": w,
-            "stop_loss": op * (1 - sp),
-            "take_profit": op * (1 + sp),
-        })
+    used_tickers = set()
 
-    for idx in short_picks:
-        op = float(opens[idx])
-        sp = float(stop_pct[idx])
-        orders.append({
-            "ticker": tickers[idx],
-            "direction": "short",
-            "weight": w,
-            "stop_loss": op * (1 + sp),
-            "take_profit": op * (1 - sp),
-        })
+    for lb, n_pos in [(5, 2), (10, 2)]:
+        ret = (closes[-1] - closes[-1 - lb]) / np.maximum(np.abs(closes[-1 - lb]), 1e-8)
+        combined_mask = valid_mask & ~np.isnan(ret)
+        valid_idx = np.where(combined_mask)[0]
+
+        if len(valid_idx) < 2 * n_pos:
+            continue
+
+        valid_rets = ret[valid_idx]
+        sorted_indices = np.argsort(valid_rets)
+
+        long_picks = valid_idx[sorted_indices[:n_pos]]
+        short_picks = valid_idx[sorted_indices[-n_pos:]]
+
+        # Half weight for each timeframe
+        w = 0.5 / (2 * n_pos)
+
+        for idx in long_picks:
+            ticker = tickers[idx]
+            if ticker in used_tickers:
+                continue
+            used_tickers.add(ticker)
+            op = float(opens[idx])
+            orders.append({
+                "ticker": ticker,
+                "direction": "long",
+                "weight": w,
+                "stop_loss": op * (1 - SL_PCT),
+                "take_profit": op * (1 + TP_PCT),
+            })
+
+        for idx in short_picks:
+            ticker = tickers[idx]
+            if ticker in used_tickers:
+                continue
+            used_tickers.add(ticker)
+            op = float(opens[idx])
+            orders.append({
+                "ticker": ticker,
+                "direction": "short",
+                "weight": w,
+                "stop_loss": op * (1 + SL_PCT),
+                "take_profit": op * (1 - TP_PCT),
+            })
 
     return orders
 
