@@ -1,11 +1,9 @@
 """
-v29-dual-tf: Dual-timeframe cross-sectional L/S MR.
+v30-gap-fade: Fade the open-to-previous-close gap.
 
-Run two independent strategies simultaneously:
-- lb=5, top/bottom 2 stocks (half weight)
-- lb=10, top/bottom 2 stocks (half weight, different picks preferred)
-
-Diversification across timeframes should reduce variance.
+Different signal from v23: instead of fading the 5-bar return (close-to-close),
+fade the GAP between current bar's open and previous bar's close.
+Large gaps tend to fill within the bar.
 """
 
 import time
@@ -17,6 +15,8 @@ t_start = time.time()
 
 SL_PCT = 0.005
 TP_PCT = 0.005
+N_LONG = 2
+N_SHORT = 2
 
 
 def build_strategy(train_data):
@@ -27,7 +27,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    if bar_idx < 11:
+    if bar_idx < 2:
         return []
 
     tickers = strategy["tickers"]
@@ -38,57 +38,45 @@ def generate_orders(strategy, data, bar_idx):
     tidx_np = tidx.numpy() if isinstance(tidx, torch.Tensor) else tidx
 
     opens = ohlcv_np[bar_idx, tidx_np, O]
-    closes = ohlcv_np[:bar_idx, tidx_np, C]
+    prev_close = ohlcv_np[bar_idx - 1, tidx_np, C]
 
-    valid_mask = (opens > 0) & ~np.isnan(opens)
+    # Gap: how much the stock jumped from last close to this open
+    gap = (opens - prev_close) / np.maximum(np.abs(prev_close), 1e-8)
+
+    valid_mask = (opens > 0) & ~np.isnan(opens) & ~np.isnan(gap)
+    valid_idx = np.where(valid_mask)[0]
+    if len(valid_idx) < N_LONG + N_SHORT:
+        return []
+
+    # Fade the gap: short stocks that gapped up, long stocks that gapped down
+    valid_gaps = gap[valid_idx]
+    sorted_indices = np.argsort(valid_gaps)
+
+    long_picks = valid_idx[sorted_indices[:N_LONG]]    # most negative gaps
+    short_picks = valid_idx[sorted_indices[-N_SHORT:]]  # most positive gaps
+
+    w = 1.0 / (N_LONG + N_SHORT)
 
     orders = []
-    used_tickers = set()
+    for idx in long_picks:
+        op = float(opens[idx])
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "long",
+            "weight": w,
+            "stop_loss": op * (1 - SL_PCT),
+            "take_profit": op * (1 + TP_PCT),
+        })
 
-    for lb, n_pos in [(5, 2), (10, 2)]:
-        ret = (closes[-1] - closes[-1 - lb]) / np.maximum(np.abs(closes[-1 - lb]), 1e-8)
-        combined_mask = valid_mask & ~np.isnan(ret)
-        valid_idx = np.where(combined_mask)[0]
-
-        if len(valid_idx) < 2 * n_pos:
-            continue
-
-        valid_rets = ret[valid_idx]
-        sorted_indices = np.argsort(valid_rets)
-
-        long_picks = valid_idx[sorted_indices[:n_pos]]
-        short_picks = valid_idx[sorted_indices[-n_pos:]]
-
-        # Half weight for each timeframe
-        w = 0.5 / (2 * n_pos)
-
-        for idx in long_picks:
-            ticker = tickers[idx]
-            if ticker in used_tickers:
-                continue
-            used_tickers.add(ticker)
-            op = float(opens[idx])
-            orders.append({
-                "ticker": ticker,
-                "direction": "long",
-                "weight": w,
-                "stop_loss": op * (1 - SL_PCT),
-                "take_profit": op * (1 + TP_PCT),
-            })
-
-        for idx in short_picks:
-            ticker = tickers[idx]
-            if ticker in used_tickers:
-                continue
-            used_tickers.add(ticker)
-            op = float(opens[idx])
-            orders.append({
-                "ticker": ticker,
-                "direction": "short",
-                "weight": w,
-                "stop_loss": op * (1 + SL_PCT),
-                "take_profit": op * (1 - TP_PCT),
-            })
+    for idx in short_picks:
+        op = float(opens[idx])
+        orders.append({
+            "ticker": tickers[idx],
+            "direction": "short",
+            "weight": w,
+            "stop_loss": op * (1 + SL_PCT),
+            "take_profit": op * (1 - TP_PCT),
+        })
 
     return orders
 
