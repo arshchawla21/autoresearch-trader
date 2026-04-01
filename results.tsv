@@ -1,2 +1,4 @@
 tag	sharpe_ratio	total_return	max_drawdown	win_rate	avg_daily_trades	build_seconds	total_seconds	peak_vram_mb	description
 v1-baseline	-7.9491	-0.0091	-0.0091	0.059	0.12	0.0	0.0	0	Random baseline
+v2-gap-fade	-6.5156	-0.0109	-0.0177	0.471	23.35	0.0	0.0	0	Fade open-vs-prev-close gap - noise
+v3-meanrev-all	5.9950	0.0113	-0.0083	0.490	25.88	0.0	0.0	0	2-bar MR all stocks mom-weighted
