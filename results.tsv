@@ -2,3 +2,4 @@ tag	sharpe_ratio	total_return	max_drawdown	win_rate	avg_daily_trades	build_secon
 v1-baseline	-3.3668	-0.0181	-0.0237	0.048	0.11	0.0	0.0	0	Random intraday baseline
 v2-momentum	-2.7919	-0.0362	-0.0712	0.455	3.00	0.0	0.0	0	4-bar momentum, top 3 stocks, ATR stops
 v3-mean-reversion	1.3250	0.0161	-0.0467	0.537	3.00	0.0	0.0	0	Fade 4-bar momentum, ATR stops
+v4-meanrev-opt	1.2930	0.0126	-0.0345	0.497	4.63	0.0	0.0	0	VIX filter, 5 stocks, tighter TP - slightly worse

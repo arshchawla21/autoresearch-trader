@@ -1,8 +1,9 @@
 """
-v3-mean-reversion: Fade short-term moves with tight stops.
+v4-meanrev-optimized: Optimized mean-reversion with VIX filter and adaptive stops.
 
-Hypothesis: intraday prices mean-revert. Stocks that moved up over last 4 bars
-will pull back, and vice versa. Use tight ATR-based stops.
+Hypothesis: mean-reversion works better with (1) more diversification (5 stocks),
+(2) tighter TP relative to SL for higher win rate, (3) VIX filter to avoid
+trading during panic periods, and (4) longer lookback for stronger signals.
 """
 
 import os
@@ -15,9 +16,10 @@ t_start = time.time()
 
 
 def build_strategy(train_data):
-    """Compute ATR stats from training data."""
+    """Compute per-stock volatility stats and VIX index."""
     ohlcv = train_data["ohlcv"].numpy()
     tidx = train_data["tradeable_indices"].numpy()
+    midx = train_data["macro_indices"].numpy()
 
     closes = ohlcv[:, tidx, C]
     highs = ohlcv[:, tidx, H]
@@ -26,16 +28,25 @@ def build_strategy(train_data):
     tr = (highs - lows) / np.maximum(closes, 1e-8)
     avg_atr_pct = np.nanmean(tr, axis=0)
 
+    # Find VIX index in macro tickers
+    all_tickers = train_data["all_tickers"]
+    vix_idx = None
+    for i, t in enumerate(all_tickers):
+        if t == "^VIX":
+            vix_idx = i
+            break
+
     return {
         "tickers": train_data["tradeable_tickers"],
         "tradeable_idx": train_data["tradeable_indices"],
         "avg_atr_pct": avg_atr_pct,
+        "vix_idx": vix_idx,
     }
 
 
 def generate_orders(strategy, data, bar_idx):
-    """Fade short-term momentum."""
-    lookback = 4
+    """Mean-reversion with VIX filter and tighter risk management."""
+    lookback = 8
     if bar_idx < lookback + 1:
         return []
 
@@ -43,6 +54,13 @@ def generate_orders(strategy, data, bar_idx):
     tidx = strategy["tradeable_idx"]
     ohlcv = data["ohlcv"]
     avg_atr = strategy["avg_atr_pct"]
+    vix_idx = strategy["vix_idx"]
+
+    # VIX filter: don't trade if VIX is very high (panic)
+    if vix_idx is not None:
+        vix_close = float(ohlcv[bar_idx - 1, vix_idx, C])
+        if vix_close > 30:
+            return []
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
     past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
@@ -53,9 +71,9 @@ def generate_orders(strategy, data, bar_idx):
     if len(valid) == 0:
         return []
 
-    # Pick stocks with strongest moves to fade
+    # Pick top 5 stocks with strongest moves to fade
     abs_mom = np.abs(momentum[valid])
-    top_k = min(3, len(valid))
+    top_k = min(5, len(valid))
     top_indices = valid[np.argsort(-abs_mom)[:top_k]]
 
     orders = []
@@ -67,14 +85,14 @@ def generate_orders(strategy, data, bar_idx):
         mom = float(momentum[idx])
         atr = float(avg_atr[idx])
 
-        if abs(mom) < 0.001:
+        if abs(mom) < 0.0015:
             continue
 
-        # FADE: go opposite to momentum
         direction = "short" if mom > 0 else "long"
 
-        sl_dist = max(atr * 1.5, 0.002) * op
-        tp_dist = max(atr * 2.0, 0.003) * op
+        # Tighter: 1.2x ATR stop, 1.0x ATR take-profit (higher win rate)
+        sl_dist = max(atr * 1.2, 0.002) * op
+        tp_dist = max(atr * 1.0, 0.0015) * op
 
         if direction == "long":
             sl = op - sl_dist
