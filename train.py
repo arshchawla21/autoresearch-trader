@@ -243,10 +243,10 @@ def generate_orders(strategy, data, day_idx):
         ap = float(atr_pct[i])
 
         confidence = abs(p - 0.5)
-        if confidence < 0.08:  # skip low-confidence
+        if confidence < 0.03:  # skip very low confidence
             continue
 
-        if p > 0.58:
+        if p > 0.53:
             candidates.append({
                 "idx": i,
                 "direction": "long",
@@ -254,7 +254,7 @@ def generate_orders(strategy, data, day_idx):
                 "open": op,
                 "atr": ap,
             })
-        elif p < 0.42:
+        elif p < 0.47:
             candidates.append({
                 "idx": i,
                 "direction": "short",
@@ -266,13 +266,13 @@ def generate_orders(strategy, data, day_idx):
     if not candidates:
         return []
 
-    # Sort by confidence, take top 5
+    # Sort by confidence, take top 6
     candidates.sort(key=lambda x: x["confidence"], reverse=True)
-    candidates = candidates[:5]
+    candidates = candidates[:6]
 
     weight_each = vol_scale / len(candidates)
     stop_m = 1.5
-    target_m = 2.0
+    target_m = 2.5
 
     orders = []
     for c in candidates:
