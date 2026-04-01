@@ -1,12 +1,10 @@
 """
 Data preparation and evaluation harness for autoresearch-trader.
-Downloads 10 years of daily OHLCV data and provides a day-trading backtest
-with stop-loss / take-profit simulation evaluated across 19 expanding-window
-6-month test slices.
+Downloads raw OHLCV market data and provides the fixed backtesting metric.
 
 Usage:
-    python prepare.py download       # download + process data
-    python prepare.py eval           # evaluate train.py strategy
+    python prepare.py                  # full prep (download + process)
+    python prepare.py --tickers SPY    # single ticker for quick testing
 
 Data is stored in ~/.cache/autoresearch-trader/.
 
@@ -18,28 +16,23 @@ import os
 import sys
 import time
 import pickle
-import datetime
-import warnings
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import torch
 import yfinance as yf
-from dateutil.relativedelta import relativedelta
-
-warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------------------------------------------------------------------
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
 TIME_BUDGET = 300          # training time budget in seconds (5 minutes)
-TRANSACTION_COST_BPS = 5   # per side (entry + exit = 10 bps round-trip)
-NUM_SLICES = 19            # number of 6-month test windows
-SLICE_MONTHS = 6           # months per test slice
-
-DATA_START = "2016-04-01"  # ~10 years of history
-DATA_END = None            # None = today
+TRAIN_END = "2025-06-30"   # last date in training set (inclusive)
+TEST_START = "2025-07-01"  # first date in test set
+DATA_START = "2021-01-01"  # start of data download (~5 years)
+TRANSACTION_COST_BPS = 10  # 10 basis points per unit turnover
+TARGET_LEVERAGE = 1.0      # gross leverage for position normalization
 
 # OHLCV channel indices (convenience constants for train.py)
 O, H, L, C, V = 0, 1, 2, 3, 4
@@ -50,7 +43,7 @@ O, H, L, C, V = 0, 1, 2, 3, 4
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch-trader")
 DATA_DIR = os.path.join(CACHE_DIR, "data")
-PROCESSED_DIR = os.path.join(CACHE_DIR, "processed_v2")
+PROCESSED_DIR = os.path.join(CACHE_DIR, "processed")
 
 # Tradeable universe: liquid ETFs + major stocks
 TRADEABLE_TICKERS = [
@@ -73,7 +66,6 @@ MACRO_TICKERS = [
     "HYG",     # High-yield corporate bond ETF
 ]
 
-
 # ---------------------------------------------------------------------------
 # Data download
 # ---------------------------------------------------------------------------
@@ -81,7 +73,7 @@ MACRO_TICKERS = [
 def download_data(tradeable=None):
     """Download raw OHLCV data from Yahoo Finance. Returns DataFrame."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    cache_path = os.path.join(DATA_DIR, "raw_ohlcv_10y.parquet")
+    cache_path = os.path.join(DATA_DIR, "raw_ohlcv.parquet")
 
     if os.path.exists(cache_path):
         print(f"Data: cached at {cache_path}")
@@ -89,13 +81,13 @@ def download_data(tradeable=None):
 
     trade_tickers = tradeable or TRADEABLE_TICKERS
     all_tickers = list(dict.fromkeys(trade_tickers + MACRO_TICKERS))
-    end_date = DATA_END or datetime.datetime.now().strftime("%Y-%m-%d")
 
-    print(f"Downloading {len(all_tickers)} tickers from {DATA_START} to {end_date}...")
+    print(f"Downloading {len(all_tickers)} tickers from {DATA_START}...")
     t0 = time.time()
 
     raw = yf.download(
-        all_tickers, start=DATA_START, end=end_date,
+        all_tickers, start=DATA_START,
+        end=datetime.now().strftime("%Y-%m-%d"),
         auto_adjust=True, threads=True,
     )
     if raw.empty:
@@ -119,7 +111,7 @@ def download_data(tradeable=None):
 
 
 # ---------------------------------------------------------------------------
-# Processing: raw OHLCV -> aligned tensors
+# Processing: raw OHLCV → aligned tensors
 # ---------------------------------------------------------------------------
 
 def process_data(df_raw, tradeable=None):
@@ -127,12 +119,15 @@ def process_data(df_raw, tradeable=None):
     Align raw OHLCV into tensors. Saves to PROCESSED_DIR.
 
     Outputs (all torch tensors / pickle):
-        ohlcv.pt              - (D, N_all, 5) float32 [Open,High,Low,Close,Volume]
-        tradeable_indices.pt  - LongTensor, tradeable ticker positions in ohlcv
-        macro_indices.pt      - LongTensor, macro ticker positions in ohlcv
-        dates.pkl             - list of datetime.date
-        all_tickers.pkl       - ordered list of all ticker names
-        tradeable_tickers.pkl - ordered list of tradeable ticker names
+        ohlcv.pt              — (D, N_all, 5) float32 [Open,High,Low,Close,Volume]
+        forward_returns.pt    — (D, N_tradeable) float32, simple close-to-close returns
+        tradeable_indices.pt  — LongTensor, tradeable ticker positions in ohlcv
+        macro_indices.pt      — LongTensor, macro ticker positions in ohlcv
+        train_end_idx.pt      — scalar int
+        test_start_idx.pt     — scalar int
+        dates.pkl             — list of datetime.date
+        all_tickers.pkl       — ordered list of all ticker names
+        tradeable_tickers.pkl — ordered list of tradeable ticker names
     """
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     if os.path.exists(os.path.join(PROCESSED_DIR, "ohlcv.pt")):
@@ -167,7 +162,7 @@ def process_data(df_raw, tradeable=None):
     D, N = len(common_dates), len(all_list)
     N_trade = len(trade_list)
     print(f"  {D} trading days, {N} tickers ({N_trade} tradeable)")
-    print(f"  {common_dates[0].date()} -> {common_dates[-1].date()}")
+    print(f"  {common_dates[0].date()} → {common_dates[-1].date()}")
 
     # Build OHLCV tensor
     ohlcv = torch.zeros(D, N, 5, dtype=torch.float32)
@@ -176,15 +171,30 @@ def process_data(df_raw, tradeable=None):
         for k, col in enumerate(["Open", "High", "Low", "Close", "Volume"]):
             ohlcv[:, j, k] = torch.from_numpy(sub[col].values.astype(np.float32))
 
+    # Forward simple returns for tradeable assets
     tradeable_idx = torch.tensor([all_list.index(t) for t in trade_list], dtype=torch.long)
+    close_trade = ohlcv[:, tradeable_idx, C]
+    fwd = torch.zeros(D, N_trade)
+    fwd[:-1] = close_trade[1:] / close_trade[:-1].clamp(min=1e-8) - 1.0
+    fwd.clamp_(-0.5, 0.5)
+
     macro_idx = torch.tensor([all_list.index(t) for t in macro_list], dtype=torch.long)
 
+    # Date split
     dates_list = [d.date() if hasattr(d, 'date') else d for d in common_dates]
+    train_end_dt = pd.Timestamp(TRAIN_END).date()
+    test_start_dt = pd.Timestamp(TEST_START).date()
+    train_end_i = max(i for i, d in enumerate(dates_list) if d <= train_end_dt)
+    test_start_i = min(i for i, d in enumerate(dates_list) if d >= test_start_dt)
+    print(f"  Train: 0–{train_end_i}  |  Test: {test_start_i}–{D-2}")
 
     # Save
     torch.save(ohlcv, os.path.join(PROCESSED_DIR, "ohlcv.pt"))
+    torch.save(fwd, os.path.join(PROCESSED_DIR, "forward_returns.pt"))
     torch.save(tradeable_idx, os.path.join(PROCESSED_DIR, "tradeable_indices.pt"))
     torch.save(macro_idx, os.path.join(PROCESSED_DIR, "macro_indices.pt"))
+    torch.save(torch.tensor(train_end_i), os.path.join(PROCESSED_DIR, "train_end_idx.pt"))
+    torch.save(torch.tensor(test_start_i), os.path.join(PROCESSED_DIR, "test_start_idx.pt"))
     with open(os.path.join(PROCESSED_DIR, "dates.pkl"), "wb") as f:
         pickle.dump(dates_list, f)
     with open(os.path.join(PROCESSED_DIR, "all_tickers.pkl"), "wb") as f:
@@ -202,27 +212,28 @@ def load_data(device="cpu"):
     """
     Load all processed data. Returns dict with:
 
-        ohlcv              - (D, N_all, 5) float tensor   [O, H, L, C, V]
-        all_tickers        - list[str], length N_all
-        tradeable_tickers  - list[str], length N_tradeable
-        tradeable_indices  - LongTensor, map tradeable -> ohlcv ticker dim
-        macro_indices      - LongTensor, map macro -> ohlcv ticker dim
-        dates              - list[datetime.date]
-        num_tradeable      - int
-        num_all            - int
+        ohlcv              — (D, N_all, 5) float tensor   [O, H, L, C, V]
+        forward_returns    — (D, N_tradeable) float tensor (simple returns)
+        all_tickers        — list[str], length N_all
+        tradeable_tickers  — list[str], length N_tradeable
+        tradeable_indices  — LongTensor, map tradeable → ohlcv ticker dim
+        macro_indices      — LongTensor, map macro → ohlcv ticker dim
+        dates              — list[datetime.date]
+        train_end_idx      — int
+        test_start_idx     — int
+        num_tradeable      — int
+        num_all            — int
 
     train.py owns ALL feature engineering. This just gives you raw OHLCV.
     """
     P = PROCESSED_DIR
-    if not os.path.exists(os.path.join(P, "ohlcv.pt")):
-        print("Data not found. Downloading and processing...")
-        df = download_data()
-        process_data(df)
-
     data = {}
-    data["ohlcv"] = torch.load(os.path.join(P, "ohlcv.pt"), map_location=device, weights_only=True)
-    data["tradeable_indices"] = torch.load(os.path.join(P, "tradeable_indices.pt"), map_location=device, weights_only=True)
-    data["macro_indices"] = torch.load(os.path.join(P, "macro_indices.pt"), map_location=device, weights_only=True)
+    data["ohlcv"] = torch.load(os.path.join(P, "ohlcv.pt"), map_location=device)
+    data["forward_returns"] = torch.load(os.path.join(P, "forward_returns.pt"), map_location=device)
+    data["tradeable_indices"] = torch.load(os.path.join(P, "tradeable_indices.pt"), map_location=device)
+    data["macro_indices"] = torch.load(os.path.join(P, "macro_indices.pt"), map_location=device)
+    data["train_end_idx"] = torch.load(os.path.join(P, "train_end_idx.pt")).item()
+    data["test_start_idx"] = torch.load(os.path.join(P, "test_start_idx.pt")).item()
     with open(os.path.join(P, "dates.pkl"), "rb") as f:
         data["dates"] = pickle.load(f)
     with open(os.path.join(P, "all_tickers.pkl"), "rb") as f:
@@ -235,408 +246,106 @@ def load_data(device="cpu"):
 
 
 # ---------------------------------------------------------------------------
-# Day-trading simulation
+# Evaluation (DO NOT CHANGE — this is the fixed metric)
 # ---------------------------------------------------------------------------
 
-def _simulate_day_trades(orders, ohlcv_today, ticker_to_idx):
+@torch.no_grad()
+def evaluate_sharpe(predict_fn, data, device="cuda"):
     """
-    Simulate one day of trading with stop-loss/take-profit.
+    Walk-forward backtest on the test period.
 
-    Each order enters at the Open price. During the day, if the price hits
-    the stop-loss or take-profit level (checked against High/Low), the trade
-    exits at that level. Otherwise the trade closes at the day's Close.
+    Interface contract for predict_fn:
+    ──────────────────────────────────
+        predict_fn(ohlcv_history, meta) -> position_scores
 
-    Returns (daily_return, trade_results).
+        ohlcv_history : (T, N_all, 5) float tensor
+            Raw OHLCV for ALL tickers, sliced up to and including today.
+            Channels: [O=0, H=1, L=2, C=3, V=4].
+            No future data is ever included.
+
+        meta : dict
+            'all_tickers'        — list[str], all ticker names
+            'tradeable_tickers'  — list[str], tradeable ticker names
+            'tradeable_indices'  — LongTensor, positions in ohlcv ticker dim
+            'macro_indices'      — LongTensor, positions in ohlcv ticker dim
+            'today_idx'          — int, today's index in the full dataset
+
+        returns : (num_tradeable,) tensor of raw position scores.
+
+    Protocol:
+        For each test day t  (test_start_idx ≤ t < D-1):
+        1. predict_fn sees ohlcv[:t+1] — everything up to today's close.
+        2. Scores normalized: weights = scores × (TARGET_LEVERAGE / Σ|scores|).
+        3. Portfolio earns forward_returns[t]  (today close → tomorrow close).
+        4. Cost = TRANSACTION_COST_BPS/10000 × Σ|weight_change|.
+
+    Returns dict:
+        sharpe_ratio  — annualized Sharpe ratio (PRIMARY METRIC)
+        total_return  — cumulative simple return over test period
+        max_drawdown  — worst peak-to-trough decline
+        avg_turnover  — mean daily turnover
+        num_test_days — number of days in backtest
     """
-    daily_return = 0.0
-    trade_results = []
+    ohlcv = data["ohlcv"].to(device)
+    fwd = data["forward_returns"].to(device)
+    test_start = data["test_start_idx"]
+    D = ohlcv.shape[0]
 
-    for order in orders:
-        ticker = order["ticker"]
-        idx = ticker_to_idx.get(ticker)
-        if idx is None:
-            continue
-
-        direction = order["direction"]
-        weight = order["weight"]
-        stop_loss = order["stop_loss"]
-        take_profit = order["take_profit"]
-
-        entry_price = float(ohlcv_today[idx, O])
-        high = float(ohlcv_today[idx, H])
-        low = float(ohlcv_today[idx, L])
-        close = float(ohlcv_today[idx, C])
-
-        if np.isnan(entry_price) or np.isnan(close) or entry_price <= 0:
-            continue
-
-        # Determine which exit conditions triggered
-        if direction == "long":
-            stop_hit = low <= stop_loss
-            limit_hit = high >= take_profit
-        else:  # short
-            stop_hit = high >= stop_loss
-            limit_hit = low <= take_profit
-
-        # Resolve exit price
-        if stop_hit and limit_hit:
-            # Both could trigger — heuristic: close direction suggests which hit first
-            if direction == "long":
-                exit_price = take_profit if close > entry_price else stop_loss
-            else:
-                exit_price = take_profit if close < entry_price else stop_loss
-        elif stop_hit:
-            exit_price = stop_loss
-        elif limit_hit:
-            exit_price = take_profit
-        else:
-            exit_price = close  # close at end of day (day trading)
-
-        # Compute return
-        if direction == "long":
-            trade_ret = (exit_price - entry_price) / entry_price
-        else:
-            trade_ret = (entry_price - exit_price) / entry_price
-
-        # Transaction cost (entry + exit)
-        cost = 2 * TRANSACTION_COST_BPS / 10_000
-        trade_ret -= cost
-
-        daily_return += weight * trade_ret
-
-        trade_results.append({
-            "ticker": ticker,
-            "direction": direction,
-            "weight": weight,
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "return": trade_ret,
-            "stop_hit": stop_hit and not limit_hit,
-            "limit_hit": limit_hit and not stop_hit,
-            "held_to_close": not stop_hit and not limit_hit,
-        })
-
-    return daily_return, trade_results
-
-
-def _validate_orders(orders, tradeable_tickers):
-    """Validate and sanitize orders. Total weight capped at 1.0."""
-    if not orders:
-        return []
-
-    valid = []
-    total_weight = 0.0
-    tradeable_set = set(tradeable_tickers)
-
-    for order in orders:
-        if not isinstance(order, dict):
-            continue
-        ticker = order.get("ticker")
-        direction = order.get("direction")
-        weight = order.get("weight", 0)
-        stop_loss = order.get("stop_loss")
-        take_profit = order.get("take_profit")
-
-        if ticker not in tradeable_set:
-            continue
-        if direction not in ("long", "short"):
-            continue
-        if not (isinstance(weight, (int, float)) and 0 < weight <= 1.0):
-            continue
-        if stop_loss is None or take_profit is None:
-            continue
-        if not (isinstance(stop_loss, (int, float)) and isinstance(take_profit, (int, float))):
-            continue
-
-        total_weight += weight
-        if total_weight > 1.0 + 1e-6:
-            # Scale down this order to fit
-            excess = total_weight - 1.0
-            weight -= excess
-            if weight <= 0:
-                break
-            order = dict(order)
-            order["weight"] = weight
-            total_weight = 1.0
-
-        valid.append(order)
-
-    return valid
-
-
-def _compute_metrics(daily_returns, all_trades):
-    """Compute strategy metrics from daily returns."""
-    if len(daily_returns) == 0:
-        return {"sharpe_ratio": 0, "total_return": 0, "max_drawdown": 0,
-                "win_rate": 0, "avg_daily_trades": 0}
-
-    rets = np.array(daily_returns)
-
-    # Sharpe ratio (annualized, 252 trading days)
-    if len(rets) < 2 or rets.std() < 1e-10:
-        sharpe = 0.0
-    else:
-        sharpe = float(np.sqrt(252) * rets.mean() / rets.std())
-
-    # Total return
-    total_return = float(np.prod(1 + rets) - 1)
-
-    # Max drawdown
-    cumulative = np.cumprod(1 + rets)
-    running_max = np.maximum.accumulate(cumulative)
-    drawdowns = cumulative / running_max - 1
-    max_drawdown = float(np.min(drawdowns))
-
-    # Win rate (days with positive return)
-    win_rate = float(np.mean(rets > 0))
-
-    # Average daily trades
-    n_days = len(rets)
-    avg_daily_trades = len(all_trades) / n_days if n_days > 0 else 0
-
-    return {
-        "sharpe_ratio": sharpe,
-        "total_return": total_return,
-        "max_drawdown": max_drawdown,
-        "win_rate": win_rate,
-        "avg_daily_trades": float(avg_daily_trades),
-    }
-
-
-def _find_date_idx(dates, target_date):
-    """Find index of nearest trading day >= target_date."""
-    for i, d in enumerate(dates):
-        if d >= target_date:
-            return i
-    return len(dates)
-
-
-# ---------------------------------------------------------------------------
-# Single backtest (used by evaluate and visualise.py)
-# ---------------------------------------------------------------------------
-
-def run_backtest(build_strategy_fn, generate_orders_fn, data,
-                 train_end_idx, test_start_idx, test_end_idx,
-                 device="cpu", verbose=True):
-    """
-    Run a single train/test backtest. Returns detailed results for analysis.
-
-    Args:
-        build_strategy_fn: callable(train_data) -> strategy
-        generate_orders_fn: callable(strategy, data, day_idx) -> list[order]
-        data: full data dict from load_data()
-        train_end_idx: last day index for training (exclusive)
-        test_start_idx: first day index for testing
-        test_end_idx: last day index for testing (exclusive)
-
-    Returns dict with:
-        daily_returns, all_trades, metrics, build_time,
-        per_day_trades (list of list of trade dicts per test day)
-    """
-    dates = data["dates"]
-    ohlcv = data["ohlcv"]
-    tradeable_idx = data["tradeable_indices"]
-    ticker_to_idx = {t: i for i, t in enumerate(data["tradeable_tickers"])}
-
-    # Build training data slice
-    train_data = {
-        "ohlcv": data["ohlcv"][:train_end_idx].to(device),
-        "dates": data["dates"][:train_end_idx],
+    meta = {
         "all_tickers": data["all_tickers"],
         "tradeable_tickers": data["tradeable_tickers"],
         "tradeable_indices": data["tradeable_indices"].to(device),
         "macro_indices": data["macro_indices"].to(device),
-        "num_tradeable": data["num_tradeable"],
-        "num_all": data["num_all"],
     }
 
-    if verbose:
-        print(f"  Train: {dates[0]} to {dates[train_end_idx-1]} ({train_end_idx} days)")
-        print(f"  Test:  {dates[test_start_idx]} to {dates[test_end_idx-1]} ({test_end_idx - test_start_idx} days)")
-
-    # Build strategy
-    t0 = time.time()
-    strategy = build_strategy_fn(train_data)
-    build_time = time.time() - t0
-
-    if build_time > TIME_BUDGET and verbose:
-        print(f"  WARNING: build_strategy took {build_time:.1f}s (budget: {TIME_BUDGET}s)")
-
-    # Run test period
     daily_returns = []
-    all_trades = []
-    per_day_trades = []
-    ohlcv_np = ohlcv.numpy() if isinstance(ohlcv, torch.Tensor) else ohlcv
-    tradeable_mask = tradeable_idx.numpy() if isinstance(tradeable_idx, torch.Tensor) else tradeable_idx
+    daily_turnover = []
+    prev_weights = torch.zeros(data["num_tradeable"], device=device)
 
-    for day in range(test_start_idx, test_end_idx):
-        # Generate orders — strategy sees data up to day_idx
-        try:
-            orders = generate_orders_fn(strategy, data, day)
-        except Exception as e:
-            if verbose:
-                print(f"  Error on {dates[day]}: {e}")
-            orders = []
+    for t in range(test_start, D - 1):
+        meta["today_idx"] = t
+        history = ohlcv[:t + 1]
 
-        orders = _validate_orders(orders, data["tradeable_tickers"])
+        raw_scores = predict_fn(history, meta)
+        if not isinstance(raw_scores, torch.Tensor):
+            raw_scores = torch.tensor(raw_scores, dtype=torch.float32, device=device)
+        raw_scores = raw_scores.float().to(device)
+        assert raw_scores.shape == (data["num_tradeable"],), \
+            f"predict_fn must return ({data['num_tradeable']},), got {raw_scores.shape}"
 
-        # Simulate using tradeable tickers' OHLCV
-        ohlcv_today = ohlcv_np[day, tradeable_mask]  # (N_tradeable, 5)
-        daily_ret, trades = _simulate_day_trades(orders, ohlcv_today, ticker_to_idx)
+        abs_sum = raw_scores.abs().sum() + 1e-10
+        weights = raw_scores * (TARGET_LEVERAGE / abs_sum)
 
-        daily_returns.append(daily_ret)
-        all_trades.extend(trades)
-        per_day_trades.append(trades)
+        turnover = (weights - prev_weights).abs().sum().item()
+        tc = TRANSACTION_COST_BPS / 10000 * turnover
+        port_ret = (weights * fwd[t]).sum().item() - tc
 
-    metrics = _compute_metrics(daily_returns, all_trades)
-    metrics["build_time"] = build_time
-    metrics["train_days"] = train_end_idx
-    metrics["test_days"] = test_end_idx - test_start_idx
+        daily_returns.append(port_ret)
+        daily_turnover.append(turnover)
+        prev_weights = weights.clone()
+
+    rets = np.array(daily_returns)
+    turns = np.array(daily_turnover)
+
+    if len(rets) < 2 or rets.std() < 1e-10:
+        sharpe = 0.0
+    else:
+        sharpe = (rets.mean() / rets.std()) * np.sqrt(252)
+
+    cumulative = np.cumprod(1 + rets)
+    total_return = cumulative[-1] - 1 if len(cumulative) > 0 else 0.0
+    peak = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - peak) / (peak + 1e-10)
+    max_dd = drawdown.min() if len(drawdown) > 0 else 0.0
+    avg_turn = turns.mean() if len(turns) > 0 else 0.0
 
     return {
-        "daily_returns": np.array(daily_returns),
-        "all_trades": all_trades,
-        "per_day_trades": per_day_trades,
-        "metrics": metrics,
-        "build_time": build_time,
-        "test_dates": dates[test_start_idx:test_end_idx],
+        "sharpe_ratio": sharpe,
+        "total_return": total_return,
+        "max_drawdown": max_dd,
+        "avg_turnover": avg_turn,
+        "num_test_days": len(rets),
     }
-
-
-# ---------------------------------------------------------------------------
-# Evaluation (DO NOT CHANGE — this is the fixed metric)
-# ---------------------------------------------------------------------------
-
-def evaluate(build_strategy_fn, generate_orders_fn, device="cpu"):
-    """
-    Evaluate a day-trading strategy using 19 expanding-window 6-month test slices.
-
-    Args:
-        build_strategy_fn(train_data: dict) -> strategy: any
-            Given training data, build/train a strategy.
-            Must complete within TIME_BUDGET (300s).
-
-            train_data contains:
-                ohlcv             - (D_train, N_all, 5) OHLCV tensor
-                dates             - list[datetime.date] for training period
-                all_tickers       - list[str]
-                tradeable_tickers - list[str]
-                tradeable_indices - LongTensor
-                macro_indices     - LongTensor
-                num_tradeable     - int
-                num_all           - int
-
-        generate_orders_fn(strategy, data: dict, day_idx: int) -> list[dict]
-            Called once per trading day. Must return orders for the day.
-
-            strategy  - whatever build_strategy_fn returned
-            data      - full data dict (same as load_data() output)
-                        only data["ohlcv"][:day_idx] is "known" history
-                        data["ohlcv"][day_idx, :, O] is today's open (available)
-                        data["ohlcv"][day_idx, :, H/L/C] is FUTURE — do not peek!
-            day_idx   - current day index in the full dataset
-
-            Each order dict:
-                "ticker"      - str, must be in tradeable_tickers
-                "direction"   - "long" or "short"
-                "weight"      - float in (0, 1], fraction of portfolio
-                "stop_loss"   - float, price level for stop-loss
-                "take_profit" - float, price level for take-profit
-
-            Total weight across all orders must be <= 1.0.
-            All trades are day trades — positions close at end of day.
-
-    Returns:
-        dict with averaged metrics across all slices:
-            sharpe_ratio    - annualized Sharpe (PRIMARY METRIC)
-            total_return    - average cumulative return per slice
-            max_drawdown    - average max drawdown per slice
-            win_rate        - average fraction of profitable days
-            avg_daily_trades - average trades per day
-            per_slice       - list of per-slice metric dicts
-    """
-    data = load_data(device="cpu")
-    dates = data["dates"]
-    n_days = len(dates)
-
-    # Compute 6-month slice boundaries from the data start date
-    start_date = dates[0]
-    boundaries = []
-    d = start_date
-    while True:
-        idx = _find_date_idx(dates, d)
-        if idx >= n_days:
-            boundaries.append(n_days)
-            break
-        boundaries.append(idx)
-        d = d + relativedelta(months=SLICE_MONTHS)
-
-    # Ensure we have the final boundary
-    if boundaries[-1] < n_days:
-        boundaries.append(n_days)
-
-    # Slice k: train=[0, boundaries[k+1]), test=[boundaries[k+1], boundaries[k+2])
-    num_slices = min(NUM_SLICES, len(boundaries) - 2)
-
-    print(f"Evaluating {num_slices} expanding-window slices...")
-    print(f"Data: {n_days} trading days from {dates[0]} to {dates[-1]}")
-
-    all_slice_metrics = []
-
-    for k in range(num_slices):
-        train_end = boundaries[k + 1]
-        test_start = boundaries[k + 1]
-        test_end = boundaries[k + 2] if k + 2 < len(boundaries) else n_days
-
-        if test_start >= test_end or test_start >= n_days:
-            continue
-
-        print(f"\n--- Slice {k+1}/{num_slices} ---")
-
-        result = run_backtest(
-            build_strategy_fn, generate_orders_fn, data,
-            train_end_idx=train_end,
-            test_start_idx=test_start,
-            test_end_idx=test_end,
-            device=device,
-            verbose=True,
-        )
-
-        metrics = result["metrics"]
-        metrics["test_start"] = str(dates[test_start])
-        metrics["test_end"] = str(dates[min(test_end - 1, n_days - 1)])
-
-        all_slice_metrics.append(metrics)
-        print(f"  Sharpe: {metrics['sharpe_ratio']:.4f} | "
-              f"Return: {metrics['total_return']*100:.2f}% | "
-              f"MaxDD: {metrics['max_drawdown']*100:.2f}% | "
-              f"WinRate: {metrics['win_rate']*100:.1f}%")
-
-    if not all_slice_metrics:
-        print("ERROR: No valid slices found.")
-        return {"sharpe_ratio": 0, "total_return": 0, "max_drawdown": 0,
-                "win_rate": 0, "avg_daily_trades": 0, "per_slice": []}
-
-    # Average across slices
-    avg_metrics = {
-        "sharpe_ratio": float(np.mean([m["sharpe_ratio"] for m in all_slice_metrics])),
-        "total_return": float(np.mean([m["total_return"] for m in all_slice_metrics])),
-        "max_drawdown": float(np.mean([m["max_drawdown"] for m in all_slice_metrics])),
-        "win_rate": float(np.mean([m["win_rate"] for m in all_slice_metrics])),
-        "avg_daily_trades": float(np.mean([m["avg_daily_trades"] for m in all_slice_metrics])),
-        "per_slice": all_slice_metrics,
-        "num_slices": len(all_slice_metrics),
-    }
-
-    print(f"\n{'='*60}")
-    print(f"AVERAGE across {len(all_slice_metrics)} slices:")
-    print(f"  Sharpe:     {avg_metrics['sharpe_ratio']:.4f}")
-    print(f"  Return:     {avg_metrics['total_return']*100:.2f}%")
-    print(f"  MaxDD:      {avg_metrics['max_drawdown']*100:.2f}%")
-    print(f"  WinRate:    {avg_metrics['win_rate']*100:.1f}%")
-    print(f"  Avg Trades: {avg_metrics['avg_daily_trades']:.1f}/day")
-
-    return avg_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -644,31 +353,22 @@ def evaluate(build_strategy_fn, generate_orders_fn, device="cpu"):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python prepare.py download   # download and process 10y data")
-        print("  python prepare.py eval       # evaluate train.py strategy")
-        sys.exit(0)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tickers", nargs="+", default=None)
+    args = parser.parse_args()
 
-    cmd = sys.argv[1]
+    print(f"Cache: {CACHE_DIR}\n")
+    df = download_data(args.tickers)
+    print()
+    process_data(df, args.tickers)
+    print()
 
-    if cmd == "download":
-        print(f"Cache: {CACHE_DIR}\n")
-        df = download_data()
-        print()
-        process_data(df)
-        print()
-        data = load_data()
-        print("Summary:")
-        print(f"  Tradeable : {data['num_tradeable']}  {data['tradeable_tickers'][:5]}...")
-        print(f"  Macro     : {len(data['macro_indices'])}  (VIX, TNX, GLD, ...)")
-        print(f"  Days      : {data['ohlcv'].shape[0]}  ({data['dates'][0]} -> {data['dates'][-1]})")
-        print(f"\nDone! Ready to train.")
-
-    elif cmd == "eval":
-        from train import build_strategy, generate_orders
-        results = evaluate(build_strategy, generate_orders)
-
-    else:
-        print(f"Unknown command: {cmd}")
-        print("Usage: python prepare.py [download|eval]")
+    data = load_data()
+    print("Summary:")
+    print(f"  Tradeable : {data['num_tradeable']}  {data['tradeable_tickers'][:5]}...")
+    print(f"  Macro     : {len(data['macro_indices'])}  (VIX, TNX, GLD, ...)")
+    print(f"  Days      : {data['ohlcv'].shape[0]}  ({data['dates'][0]} → {data['dates'][-1]})")
+    print(f"  Train     : 0–{data['train_end_idx']}")
+    print(f"  Test      : {data['test_start_idx']}–{data['ohlcv'].shape[0]-2}")
+    print(f"\nDone! Ready to train.")
