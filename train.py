@@ -1,8 +1,7 @@
 """
-v6-concentrated-meanrev: Single stock, 2-bar lookback, full weight.
+v7-1bar-lookback: Single stock, 1-bar lookback, full weight.
 
-Hypothesis: concentrating on the single most extreme mover with a faster
-2-bar lookback captures the sharpest mean-reversion opportunities.
+Hypothesis: even faster 1-bar lookback captures more immediate reversions.
 """
 
 import os
@@ -30,8 +29,7 @@ def build_strategy(train_data):
 
 
 def generate_orders(strategy, data, bar_idx):
-    lookback = 2
-    if bar_idx < lookback + 1:
+    if bar_idx < 2:
         return []
 
     tickers = strategy["tickers"]
@@ -40,9 +38,10 @@ def generate_orders(strategy, data, bar_idx):
     avg_atr = strategy["avg_atr_pct"]
 
     opens = ohlcv[bar_idx, tidx, O].numpy()
-    past_close = ohlcv[bar_idx - lookback, tidx, C].numpy()
-    current_close = ohlcv[bar_idx - 1, tidx, C].numpy()
-    momentum = (current_close - past_close) / np.maximum(past_close, 1e-8)
+    # 1-bar: use open-to-close of previous bar as momentum signal
+    prev_open = ohlcv[bar_idx - 1, tidx, O].numpy()
+    prev_close = ohlcv[bar_idx - 1, tidx, C].numpy()
+    momentum = (prev_close - prev_open) / np.maximum(prev_open, 1e-8)
 
     valid = np.where((opens > 0) & ~np.isnan(opens) & ~np.isnan(momentum))[0]
     if len(valid) == 0:
@@ -57,7 +56,7 @@ def generate_orders(strategy, data, bar_idx):
     mom = float(momentum[best])
     atr = float(avg_atr[best])
 
-    if abs(mom) < 0.002:
+    if abs(mom) < 0.0005:
         return []
 
     direction = "short" if mom > 0 else "long"
