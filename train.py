@@ -4,54 +4,11 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-You must implement the function:
+Strategy 2: Multi-Asset Z-Score Statistical Arbitrage with VIX Filter
 
-    trade(prices, current_idx, symbols) -> list[float]
-
-Parameters
-----------
-prices : dict[str, pd.DataFrame]
-    Mapping from symbol name to a DataFrame of OHLCV data with a
-    DatetimeIndex. Contains ALL data from the start of the dataset up
-    to and including the current 5-minute candle. This means:
-      - During evaluation (days 31–60), you always have at least 30
-        trading days of history to work with for training, feature
-        engineering, etc.
-      - Both tradeable symbols and market indicators (^VIX, ^TNX, GLD,
-        TLT, DX-Y.NYB) are included — use them freely for signals.
-
-current_idx : int
-    The integer index of the current candle in the aligned close-price
-    matrix. Mostly useful for the harness; you probably won't need it.
-
-symbols : list[str]
-    Ordered list of tradeable symbols. Your returned weight vector must
-    match this ordering. Currently 15 symbols:
-    ["AAPL","MSFT","NVDA","AMZN","TSLA","META","GOOGL","JPM","XOM","UNH",
-     "SPY","QQQ","IWM","XLF","XLE"]
-
-Returns
--------
-list[float]
-    A weight vector of length len(symbols). Each weight is the fraction
-    of the portfolio to allocate to that asset.
-      - Positive = long, Negative = short.
-      - Constraint: sum(|weights|) <= 1.0 (net leverage ≤ 1).
-        If you exceed 1.0, the harness rescales automatically.
-      - Example: [0.0, 0.25, 0.5, 0.0, -0.25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        means 25% long MSFT, 50% long NVDA, 25% short TSLA, rest flat.
-
-Notes
------
-- You have full freedom: ML models, technical indicators, statistical
-  methods, heuristics, regime detection, anything.
-- You can import any library (numpy, pandas, sklearn, torch, etc.).
-- You can define helper functions, classes, global state, caches.
-- The function is called once per 5-min candle during evaluation
-  (~78 calls/day × ~22 eval days ≈ 1,700 calls). Keep it fast enough
-  to finish in reasonable time, but don't over-optimize prematurely.
-- Global state persists across calls within a single backtest run,
-  so you can cache computed features, trained models, etc.
+Hypothesis: Price deviations from short-term moving averages create
+mean-reversion opportunities. We scale positions by the z-score of
+the deviation, with position sizing modulated by VIX regime.
 """
 
 from __future__ import annotations
@@ -60,12 +17,37 @@ import numpy as np
 import pandas as pd
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STRATEGY 1: VIX Regime-Based Momentum/Mean-Reversion
-# ═══════════════════════════════════════════════════════════════════════════════
-# Hypothesis: High volatility (VIX > threshold) favors mean-reversion,
-# while low volatility favors momentum continuation.
-# We trade the strongest/weakest momentum signals based on short-term returns.
+# Global cache for computed features
+_cache: dict = {}
+
+
+def _compute_zscores(
+    prices: dict[str, pd.DataFrame], symbols: list[str], lookback: int = 20
+) -> dict[str, float]:
+    """Compute z-score of current price vs SMA for each symbol."""
+    zscores = {}
+    for sym in symbols:
+        if sym not in prices or len(prices[sym]) < lookback + 1:
+            zscores[sym] = 0.0
+            continue
+        df = prices[sym]
+        closes = df["close"].values
+
+        # Recent window
+        recent = closes[-lookback:]
+        current = closes[-1]
+
+        sma = np.mean(recent)
+        std = np.std(recent)
+
+        if std > 0:
+            zscore = (current - sma) / std
+        else:
+            zscore = 0.0
+
+        zscores[sym] = zscore
+
+    return zscores
 
 
 def trade(
@@ -74,67 +56,48 @@ def trade(
     symbols: list[str],
 ) -> list[float]:
     """
-    VIX regime-based momentum/mean-reversion strategy.
+    Z-score statistical arbitrage strategy.
 
-    Uses VIX to detect volatility regime:
-    - High VIX (> 20): Trade mean-reversion (fade strong moves)
-    - Low VIX (<= 20): Trade momentum (follow trends)
-
-    Selects top/bottom 3 performers based on 5-bar returns.
+    1. Compute z-score of current price vs 20-bar SMA for each symbol
+    2. Go short when z-score > 1.0 (overbought), long when z-score < -1.0 (oversold)
+    3. Position sizes proportional to z-score magnitude
+    4. VIX scaling: reduce exposure when VIX > 25 (high uncertainty)
     """
-    # Get current VIX level
+    # Get VIX for scaling
     vix_sym = "^VIX"
-    if vix_sym not in prices or len(prices[vix_sym]) < 5:
-        # Fallback to flat if no VIX data
-        return [0.0] * len(symbols)
+    vix_value = 20.0  # default
+    if vix_sym in prices and len(prices[vix_sym]) > 0:
+        vix_value = prices[vix_sym]["close"].iloc[-1]
 
-    vix_df = prices[vix_sym]
-    current_vix = vix_df["close"].iloc[-1]
+    # Compute z-scores
+    zscores = _compute_zscores(prices, symbols, lookback=20)
 
-    # VIX threshold for regime switching
-    VIX_THRESHOLD = 20.0
-    high_vol_regime = current_vix > VIX_THRESHOLD
+    # Z-score thresholds
+    Z_THRESHOLD = 1.0
+    MAX_POS_SIZE = 0.15  # max 15% per position
 
-    # Compute 5-bar returns for all tradeable symbols
-    returns = {}
+    weights = []
     for sym in symbols:
-        if sym not in prices or len(prices[sym]) < 6:
-            returns[sym] = 0.0
-            continue
-        df = prices[sym]
-        recent_close = df["close"].iloc[-1]
-        past_close = df["close"].iloc[-6]  # 5 bars ago
-        ret = (recent_close - past_close) / past_close if past_close > 0 else 0.0
-        returns[sym] = ret
+        z = zscores.get(sym, 0.0)
 
-    # Sort by returns
-    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
+        if abs(z) < Z_THRESHOLD:
+            # No signal
+            weights.append(0.0)
+        else:
+            # Position inversely proportional to z-score (mean reversion)
+            # High positive z -> short, High negative z -> long
+            raw_weight = -np.sign(z) * min(abs(z) * 0.1, MAX_POS_SIZE)
+            weights.append(raw_weight)
 
-    # Initialize weights
-    weights = {sym: 0.0 for sym in symbols}
+    # Normalize to leverage <= 1.0
+    total_leverage = sum(abs(w) for w in weights)
+    if total_leverage > 1.0:
+        weights = [w / total_leverage for w in weights]
 
-    if high_vol_regime:
-        # Mean-reversion: long worst performers, short best performers
-        # Take bottom 3 (weakest) as longs
-        longs = sorted_syms[:3]
-        # Take top 3 (strongest) as shorts
-        shorts = sorted_syms[-3:]
+    # VIX-based scaling: reduce exposure in high vol
+    if vix_value > 25:
+        weights = [w * 0.5 for w in weights]  # 50% reduction
+    elif vix_value > 20:
+        weights = [w * 0.75 for w in weights]  # 25% reduction
 
-        for sym in longs:
-            weights[sym] = 1.0 / 6.0
-        for sym in shorts:
-            weights[sym] = -1.0 / 6.0
-    else:
-        # Momentum: long best performers, short worst performers
-        # Take top 3 (strongest) as longs
-        longs = sorted_syms[-3:]
-        # Take bottom 3 (weakest) as shorts
-        shorts = sorted_syms[:3]
-
-        for sym in longs:
-            weights[sym] = 1.0 / 6.0
-        for sym in shorts:
-            weights[sym] = -1.0 / 6.0
-
-    # Return weights in the order of symbols list
-    return [weights[sym] for sym in symbols]
+    return weights
