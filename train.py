@@ -1,210 +1,140 @@
+#!/usr/bin/env python3
 """
-Autoresearch-trader training script. Single-GPU, single-file.
+train.py — Strategy Implementation
+====================================
+THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-v22: Sweep factor model weights for beta-neutralization.
+You must implement the function:
 
-Hypothesis: The ad-hoc factor weights (1.0*SPY, 0.3*QQQ, 0.15*IWM) are
-suboptimal. Systematically sweeping these weights will find better residuals
-for momentum computation.
+    trade(prices, current_idx, symbols) -> list[float]
 
-Usage: uv run train.py
+Parameters
+----------
+prices : dict[str, pd.DataFrame]
+    Mapping from symbol name to a DataFrame of OHLCV data with a
+    DatetimeIndex. Contains ALL data from the start of the dataset up
+    to and including the current 5-minute candle. This means:
+      - During evaluation (days 31–60), you always have at least 30
+        trading days of history to work with for training, feature
+        engineering, etc.
+      - Both tradeable symbols and market indicators (^VIX, ^TNX, GLD,
+        TLT, DX-Y.NYB) are included — use them freely for signals.
+
+current_idx : int
+    The integer index of the current candle in the aligned close-price
+    matrix. Mostly useful for the harness; you probably won't need it.
+
+symbols : list[str]
+    Ordered list of tradeable symbols. Your returned weight vector must
+    match this ordering. Currently 15 symbols:
+    ["AAPL","MSFT","NVDA","AMZN","TSLA","META","GOOGL","JPM","XOM","UNH",
+     "SPY","QQQ","IWM","XLF","XLE"]
+
+Returns
+-------
+list[float]
+    A weight vector of length len(symbols). Each weight is the fraction
+    of the portfolio to allocate to that asset.
+      - Positive = long, Negative = short.
+      - Constraint: sum(|weights|) <= 1.0 (net leverage ≤ 1).
+        If you exceed 1.0, the harness rescales automatically.
+      - Example: [0.0, 0.25, 0.5, 0.0, -0.25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        means 25% long MSFT, 50% long NVDA, 25% short TSLA, rest flat.
+
+Notes
+-----
+- You have full freedom: ML models, technical indicators, statistical
+  methods, heuristics, regime detection, anything.
+- You can import any library (numpy, pandas, sklearn, torch, etc.).
+- You can define helper functions, classes, global state, caches.
+- The function is called once per 5-min candle during evaluation
+  (~78 calls/day × ~22 eval days ≈ 1,700 calls). Keep it fast enough
+  to finish in reasonable time, but don't over-optimize prematurely.
+- Global state persists across calls within a single backtest run,
+  so you can cache computed features, trained models, etc.
 """
 
-import os
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+from __future__ import annotations
 
-import time
-import torch
+import numpy as np
+import pandas as pd
 
-from prepare import (
-    C,
-    load_data, evaluate_sharpe,
-)
 
-t_start = time.time()
-torch.manual_seed(42)
-device = torch.device("cuda")
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRATEGY 1: VIX Regime-Based Momentum/Mean-Reversion
+# ═══════════════════════════════════════════════════════════════════════════════
+# Hypothesis: High volatility (VIX > threshold) favors mean-reversion,
+# while low volatility favors momentum continuation.
+# We trade the strongest/weakest momentum signals based on short-term returns.
 
-data = load_data(device="cpu")
-ohlcv = data["ohlcv"]
-tradeable_idx = data["tradeable_indices"]
-N_trade = data["num_tradeable"]
-D = ohlcv.shape[0]
 
-close = ohlcv[:, tradeable_idx, C]
-log_close = torch.log(close.clamp(min=1e-8))
-daily_ret = torch.zeros(D, N_trade)
-daily_ret[1:] = log_close[1:] - log_close[:-1]
+def trade(
+    prices: dict[str, pd.DataFrame],
+    current_idx: int,
+    symbols: list[str],
+) -> list[float]:
+    """
+    VIX regime-based momentum/mean-reversion strategy.
 
-spy_ret = daily_ret[:, 0]
-qqq_ret = daily_ret[:, 1]
-iwm_ret = daily_ret[:, 2]
-dia_ret = daily_ret[:, 3]
+    Uses VIX to detect volatility regime:
+    - High VIX (> 20): Trade mean-reversion (fade strong moves)
+    - Low VIX (<= 20): Trade momentum (follow trends)
 
-def cross_zscore(x):
-    mu = x.mean(dim=1, keepdim=True)
-    std = x.std(dim=1, keepdim=True).clamp(min=1e-8)
-    return (x - mu) / std
+    Selects top/bottom 3 performers based on 5-bar returns.
+    """
+    # Get current VIX level
+    vix_sym = "^VIX"
+    if vix_sym not in prices or len(prices[vix_sym]) < 5:
+        # Fallback to flat if no VIX data
+        return [0.0] * len(symbols)
 
-def compute_betas(daily_ret, ref_ret, lookback):
-    betas = torch.zeros(D, N_trade)
-    for t in range(lookback, D):
-        ref_w = ref_ret[t - lookback:t]
-        ref_dm = ref_w - ref_w.mean()
-        ref_var = (ref_dm ** 2).mean().clamp(min=1e-10)
-        for j in range(N_trade):
-            asset_w = daily_ret[t - lookback:t, j]
-            cov = ((asset_w - asset_w.mean()) * ref_dm).mean()
-            betas[t, j] = cov / ref_var
-    betas[:lookback] = 1.0
-    return betas
+    vix_df = prices[vix_sym]
+    current_vix = vix_df["close"].iloc[-1]
 
-def risk_adj_momentum(ret_tensor, horizon, skip=5):
-    sig = torch.zeros(D, N_trade)
-    for t in range(horizon + skip, D):
-        window = ret_tensor[t - horizon - skip:t - skip]
-        cum_ret = window.sum(dim=0)
-        vol = window.std(dim=0).clamp(min=1e-8) * (horizon ** 0.5)
-        sig[t] = cum_ret / vol
-    return sig
+    # VIX threshold for regime switching
+    VIX_THRESHOLD = 20.0
+    high_vol_regime = current_vix > VIX_THRESHOLD
 
-def simple_momentum(log_close, horizon):
-    sig = torch.zeros_like(log_close)
-    sig[horizon:] = log_close[horizon:] - log_close[:-horizon]
-    return sig
+    # Compute 5-bar returns for all tradeable symbols
+    returns = {}
+    for sym in symbols:
+        if sym not in prices or len(prices[sym]) < 6:
+            returns[sym] = 0.0
+            continue
+        df = prices[sym]
+        recent_close = df["close"].iloc[-1]
+        past_close = df["close"].iloc[-6]  # 5 bars ago
+        ret = (recent_close - past_close) / past_close if past_close > 0 else 0.0
+        returns[sym] = ret
 
-print("Computing betas...")
+    # Sort by returns
+    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
 
-betas_spy = compute_betas(daily_ret, spy_ret, 42)
-betas_qqq = compute_betas(daily_ret, qqq_ret, 42)
-betas_iwm = compute_betas(daily_ret, iwm_ret, 42)
-betas_dia = compute_betas(daily_ret, dia_ret, 42)
+    # Initialize weights
+    weights = {sym: 0.0 for sym in symbols}
 
-z_rev5 = cross_zscore(simple_momentum(log_close, 5))
+    if high_vol_regime:
+        # Mean-reversion: long worst performers, short best performers
+        # Take bottom 3 (weakest) as longs
+        longs = sorted_syms[:3]
+        # Take top 3 (strongest) as shorts
+        shorts = sorted_syms[-3:]
 
-# Dispersion
-cs_disp = daily_ret.std(dim=1)
-disp_ma42 = torch.zeros(D)
-for t in range(42, D):
-    disp_ma42[t] = cs_disp[t - 42:t].mean()
-disp_ma42[:42] = cs_disp[:42].mean()
-dr = (cs_disp / disp_ma42.clamp(min=1e-8)).unsqueeze(1).clamp(0.2, 4.0)
+        for sym in longs:
+            weights[sym] = 1.0 / 6.0
+        for sym in shorts:
+            weights[sym] = -1.0 / 6.0
+    else:
+        # Momentum: long best performers, short worst performers
+        # Take top 3 (strongest) as longs
+        longs = sorted_syms[-3:]
+        # Take bottom 3 (weakest) as shorts
+        shorts = sorted_syms[:3]
 
-# Acceleration + underreaction (fixed from v18 best)
-mom_21_raw = torch.zeros(D, N_trade)
-for t in range(21, D):
-    mom_21_raw[t] = daily_ret[t-21:t].sum(dim=0)
-sig_accel = torch.zeros(D, N_trade)
-for t in range(31, D):
-    sig_accel[t] = mom_21_raw[t] - mom_21_raw[t - 10]
-sig_accel = cross_zscore(sig_accel)
+        for sym in longs:
+            weights[sym] = 1.0 / 6.0
+        for sym in shorts:
+            weights[sym] = -1.0 / 6.0
 
-expected_ret_spy = betas_spy * spy_ret.unsqueeze(1)
-underreaction = expected_ret_spy - daily_ret
-sig_ur = torch.zeros(D, N_trade)
-for t in range(5, D):
-    sig_ur[t] = underreaction[t-5:t].sum(dim=0)
-sig_ur = cross_zscore(sig_ur)
-
-print("Sweeping factor weights...")
-best_sharpe = -999
-best_smooth = None
-best_name = ""
-
-configs = []
-
-# Sweep SPY weight, QQQ weight, IWM weight
-for w_spy in [0.7, 0.8, 0.9, 1.0, 1.1]:
-    for w_qqq in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
-        for w_iwm in [0.0, 0.1, 0.15, 0.2, 0.3]:
-            # Compute residual
-            bn = daily_ret - w_spy * betas_spy * spy_ret.unsqueeze(1) \
-                           - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
-                           - w_iwm * betas_iwm * iwm_ret.unsqueeze(1)
-
-            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
-            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
-
-            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
-                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
-
-            # EMA smooth
-            smooth = torch.zeros(D, N_trade)
-            smooth[0] = sig[0]
-            for t in range(1, D):
-                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
-
-            smooth_gpu = smooth.to(device)
-            def _pred(oh, meta, _s=smooth_gpu):
-                return _s[meta["today_idx"]]
-
-            res = evaluate_sharpe(_pred, data, device=device)
-            sh = res["sharpe_ratio"]
-
-            if sh > best_sharpe:
-                best_sharpe = sh
-                best_smooth = smooth_gpu
-                best_name = f"spy{w_spy}_qqq{w_qqq}_iwm{w_iwm}"
-                print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
-                      f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
-                      f"Turn={res['avg_turnover']:.4f}")
-
-# Also try adding DIA as 4th factor
-print("\nTrying 4-factor (+ DIA)...")
-for w_qqq in [0.2, 0.3, 0.4]:
-    for w_iwm in [0.1, 0.15, 0.2]:
-        for w_dia in [0.05, 0.1, 0.15, 0.2]:
-            bn = daily_ret - betas_spy * spy_ret.unsqueeze(1) \
-                           - w_qqq * betas_qqq * qqq_ret.unsqueeze(1) \
-                           - w_iwm * betas_iwm * iwm_ret.unsqueeze(1) \
-                           - w_dia * betas_dia * dia_ret.unsqueeze(1)
-
-            ram_21 = cross_zscore(risk_adj_momentum(bn, 21, skip=5))
-            ram_63 = cross_zscore(risk_adj_momentum(bn, 63, skip=5))
-
-            sig = (-0.50 * z_rev5 + 0.20 * ram_21 + 0.30 * ram_63
-                   - 0.10 * sig_accel + 0.12 * sig_ur) * dr
-
-            smooth = torch.zeros(D, N_trade)
-            smooth[0] = sig[0]
-            for t in range(1, D):
-                smooth[t] = 0.035 * sig[t] + 0.965 * smooth[t - 1]
-
-            smooth_gpu = smooth.to(device)
-            def _pred2(oh, meta, _s=smooth_gpu):
-                return _s[meta["today_idx"]]
-
-            res = evaluate_sharpe(_pred2, data, device=device)
-            sh = res["sharpe_ratio"]
-
-            if sh > best_sharpe:
-                best_sharpe = sh
-                best_smooth = smooth_gpu
-                best_name = f"4f_qqq{w_qqq}_iwm{w_iwm}_dia{w_dia}"
-                print(f"  NEW BEST: {best_name}: Sharpe={sh:.4f}  "
-                      f"Return={res['total_return']:.4f}  MaxDD={res['max_drawdown']:.4f}  "
-                      f"Turn={res['avg_turnover']:.4f}")
-
-print(f"\nBest: {best_name} Sharpe={best_sharpe:.4f}")
-
-total_train_time = 0.0
-num_params = 0
-
-def predict_fn(ohlcv_history, meta):
-    return best_smooth[meta["today_idx"]]
-
-results = evaluate_sharpe(predict_fn, data, device=device)
-
-t_end = time.time()
-peak_vram = torch.cuda.max_memory_allocated() / 1024 / 1024
-
-print("---")
-print(f"sharpe_ratio:     {results['sharpe_ratio']:.4f}")
-print(f"total_return:     {results['total_return']:.4f}")
-print(f"max_drawdown:     {results['max_drawdown']:.4f}")
-print(f"avg_turnover:     {results['avg_turnover']:.4f}")
-print(f"num_test_days:    {results['num_test_days']}")
-print(f"training_seconds: {total_train_time:.1f}")
-print(f"total_seconds:    {t_end - t_start:.1f}")
-print(f"peak_vram_mb:     {peak_vram:.1f}")
-print(f"num_params:       {num_params:,}")
+    # Return weights in the order of symbols list
+    return [weights[sym] for sym in symbols]
