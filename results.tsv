@@ -1,1 +1,2 @@
 run_tag	strategy_name	sharpe_ratio	total_return	sortino_ratio	calmar_ratio	max_drawdown	win_rate	profit_factor	n_trades	notes	timestampapr03	random_baseline	-3.4622	-0.018178	-4.2436	-0.4166	-0.043637	0.4756	0.9281	1413	Random baseline strategy	2026-04-03T01:24:11+11:00
+apr03	vix_regime_momentum	3.4444	0.039164	4.4784	1.0274	-0.03812	0.5074	1.0993	1413	VIX regime switch: high vol=mean-reversion, low vol=momentum	2026-04-03T01:25:31+11:00
