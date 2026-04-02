@@ -4,15 +4,11 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 3: Multi-Timeframe Momentum with Market Regime Filter
+Strategy 4: Ensemble of VIX Regime Momentum + Z-Score Mean Reversion
 
-Hypothesis: Combining short-term and medium-term momentum signals
-provides more robust trend detection. We use:
-- Short-term momentum: 5-bar returns
-- Medium-term momentum: 20-bar returns
-- Market regime: VIX trend (rising/falling) and 10Y yield direction
-
-Only trade when both timeframes agree on direction.
+Hypothesis: The two successful individual strategies capture different
+market phenomena (trend following vs mean reversion). Combining them
+should provide diversification benefits and potentially higher Sharpe.
 """
 
 from __future__ import annotations
@@ -21,44 +17,81 @@ import numpy as np
 import pandas as pd
 
 
-def _compute_returns(
-    prices: dict[str, pd.DataFrame], symbols: list[str], lookback: int
+def _get_vix_momentum_weights(
+    prices: dict[str, pd.DataFrame], symbols: list[str]
 ) -> dict[str, float]:
-    """Compute returns over lookback periods for all symbols."""
+    """
+    Strategy A: VIX regime-based momentum/mean-reversion.
+    High VIX -> mean reversion, Low VIX -> momentum.
+    """
+    vix_sym = "^VIX"
+    if vix_sym not in prices or len(prices[vix_sym]) < 5:
+        return {sym: 0.0 for sym in symbols}
+
+    vix_df = prices[vix_sym]
+    current_vix = vix_df["close"].iloc[-1]
+
+    VIX_THRESHOLD = 20.0
+    high_vol_regime = current_vix > VIX_THRESHOLD
+
+    # Compute 5-bar returns
     returns = {}
     for sym in symbols:
-        if sym not in prices or len(prices[sym]) < lookback + 1:
+        if sym not in prices or len(prices[sym]) < 6:
             returns[sym] = 0.0
             continue
         df = prices[sym]
+        recent_close = df["close"].iloc[-1]
+        past_close = df["close"].iloc[-6]
+        ret = (recent_close - past_close) / past_close if past_close > 0 else 0.0
+        returns[sym] = ret
+
+    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
+    weights = {sym: 0.0 for sym in symbols}
+
+    if high_vol_regime:
+        # Mean-reversion: long worst, short best
+        for sym in sorted_syms[:3]:
+            weights[sym] = 1.0 / 6.0
+        for sym in sorted_syms[-3:]:
+            weights[sym] = -1.0 / 6.0
+    else:
+        # Momentum: long best, short worst
+        for sym in sorted_syms[-3:]:
+            weights[sym] = 1.0 / 6.0
+        for sym in sorted_syms[:3]:
+            weights[sym] = -1.0 / 6.0
+
+    return weights
+
+
+def _get_zscore_weights(
+    prices: dict[str, pd.DataFrame], symbols: list[str]
+) -> dict[str, float]:
+    """
+    Strategy B: Z-score mean reversion.
+    Trade deviations from 20-bar SMA.
+    """
+    weights = {sym: 0.0 for sym in symbols}
+
+    for sym in symbols:
+        if sym not in prices or len(prices[sym]) < 21:
+            continue
+        df = prices[sym]
         closes = df["close"].values
+
+        recent = closes[-20:]
         current = closes[-1]
-        past = closes[-(lookback + 1)]
-        if past > 0:
-            returns[sym] = (current - past) / past
-        else:
-            returns[sym] = 0.0
-    return returns
 
+        sma = float(np.mean(recent))
+        std = float(np.std(recent))
 
-def _get_trend(
-    prices: dict[str, pd.DataFrame], symbol: str, lookback: int = 10
-) -> float:
-    """Get recent trend direction (-1 to 1) for an indicator."""
-    if symbol not in prices or len(prices[symbol]) < lookback + 1:
-        return 0.0
-    df = prices[symbol]
-    closes = df["close"].values
-    recent = closes[-lookback:]
-    # Simple linear regression slope normalized by mean
-    x = np.arange(len(recent))
-    slope = np.polyfit(x, recent, 1)[0]
-    mean_price = np.mean(recent)
-    if mean_price > 0:
-        normalized_slope = slope / mean_price
-        # Clamp to [-1, 1] range
-        return np.tanh(normalized_slope * 100)
-    return 0.0
+        if std > 0:
+            zscore = (current - sma) / std
+            if abs(zscore) >= 1.0:
+                weights[sym] = -np.sign(zscore) * min(abs(zscore) * 0.1, 0.15)
+
+    return weights
 
 
 def trade(
@@ -67,70 +100,28 @@ def trade(
     symbols: list[str],
 ) -> list[float]:
     """
-    Multi-timeframe momentum with market regime filter.
+    Ensemble of two complementary strategies.
 
-    1. Compute 5-bar (short) and 20-bar (medium) returns
-    2. Only take positions when both agree in direction
-    3. Position strength = average of short and medium momentum
-    4. Scale by VIX trend (reduce size when VIX rising sharply)
-    5. Use 10Y yield trend as additional risk-off filter
+    Weights: 60% VIX regime + 40% z-score
     """
-    # Compute momentum signals
-    short_ret = _compute_returns(prices, symbols, lookback=5)
-    medium_ret = _compute_returns(prices, symbols, lookback=20)
+    # Get weights from each strategy
+    vix_weights = _get_vix_momentum_weights(prices, symbols)
+    zscore_weights = _get_zscore_weights(prices, symbols)
 
-    # Get market regime indicators
-    vix_trend = _get_trend(prices, "^VIX", lookback=10)
-    tnx_trend = _get_trend(prices, "^TNX", lookback=10)
+    # Ensemble weighting
+    VIX_ALLOC = 0.6
+    ZSCORE_ALLOC = 0.4
 
-    # Current VIX level
-    vix_level = 20.0
-    if "^VIX" in prices and len(prices["^VIX"]) > 0:
-        vix_level = prices["^VIX"]["close"].iloc[-1]
-
-    weights = []
+    final_weights = []
     for sym in symbols:
-        s = short_ret.get(sym, 0.0)
-        m = medium_ret.get(sym, 0.0)
+        combined = VIX_ALLOC * vix_weights.get(
+            sym, 0.0
+        ) + ZSCORE_ALLOC * zscore_weights.get(sym, 0.0)
+        final_weights.append(combined)
 
-        # Only trade when both timeframes agree
-        if s * m <= 0:  # Different signs or one is zero
-            weights.append(0.0)
-            continue
-
-        # Average momentum
-        avg_mom = (s + m) / 2
-
-        # Position size based on momentum magnitude
-        # Scale to reasonable range (-0.15 to 0.15 per position)
-        pos_size = np.sign(avg_mom) * min(abs(avg_mom) * 5, 0.15)
-
-        weights.append(pos_size)
-
-    # Normalize to leverage <= 1.0
-    total_lev = sum(abs(w) for w in weights)
+    # Normalize to ensure leverage <= 1.0
+    total_lev = sum(abs(w) for w in final_weights)
     if total_lev > 1.0:
-        weights = [w / total_lev for w in weights]
+        final_weights = [w / total_lev for w in final_weights]
 
-    # Regime-based scaling
-    scale = 1.0
-
-    # Reduce exposure when VIX is rising (volatility expansion)
-    if vix_trend > 0.3:
-        scale *= 0.6
-    elif vix_trend > 0.1:
-        scale *= 0.8
-
-    # Reduce exposure when yields rising rapidly (tightening)
-    if tnx_trend > 0.5:
-        scale *= 0.7
-
-    # Cap positions when VIX very high (uncertainty)
-    if vix_level > 30:
-        scale *= 0.5
-    elif vix_level > 25:
-        scale *= 0.75
-
-    weights = [w * scale for w in weights]
-
-    return weights
+    return final_weights
