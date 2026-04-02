@@ -4,11 +4,11 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 4: Ensemble of VIX Regime Momentum + Z-Score Mean Reversion
+Strategy 5: Sector Rotation with Relative Strength
 
-Hypothesis: The two successful individual strategies capture different
-market phenomena (trend following vs mean reversion). Combining them
-should provide diversification benefits and potentially higher Sharpe.
+Hypothesis: Different market sectors show persistent relative strength.
+We rank sectors by risk-adjusted momentum and rotate into the strongest,
+while using VIX to modulate overall exposure.
 """
 
 from __future__ import annotations
@@ -17,81 +17,15 @@ import numpy as np
 import pandas as pd
 
 
-def _get_vix_momentum_weights(
-    prices: dict[str, pd.DataFrame], symbols: list[str]
-) -> dict[str, float]:
-    """
-    Strategy A: VIX regime-based momentum/mean-reversion.
-    High VIX -> mean reversion, Low VIX -> momentum.
-    """
-    vix_sym = "^VIX"
-    if vix_sym not in prices or len(prices[vix_sym]) < 5:
-        return {sym: 0.0 for sym in symbols}
-
-    vix_df = prices[vix_sym]
-    current_vix = vix_df["close"].iloc[-1]
-
-    VIX_THRESHOLD = 20.0
-    high_vol_regime = current_vix > VIX_THRESHOLD
-
-    # Compute 5-bar returns
-    returns = {}
-    for sym in symbols:
-        if sym not in prices or len(prices[sym]) < 6:
-            returns[sym] = 0.0
-            continue
-        df = prices[sym]
-        recent_close = df["close"].iloc[-1]
-        past_close = df["close"].iloc[-6]
-        ret = (recent_close - past_close) / past_close if past_close > 0 else 0.0
-        returns[sym] = ret
-
-    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
-    weights = {sym: 0.0 for sym in symbols}
-
-    if high_vol_regime:
-        # Mean-reversion: long worst, short best
-        for sym in sorted_syms[:3]:
-            weights[sym] = 1.0 / 6.0
-        for sym in sorted_syms[-3:]:
-            weights[sym] = -1.0 / 6.0
-    else:
-        # Momentum: long best, short worst
-        for sym in sorted_syms[-3:]:
-            weights[sym] = 1.0 / 6.0
-        for sym in sorted_syms[:3]:
-            weights[sym] = -1.0 / 6.0
-
-    return weights
-
-
-def _get_zscore_weights(
-    prices: dict[str, pd.DataFrame], symbols: list[str]
-) -> dict[str, float]:
-    """
-    Strategy B: Z-score mean reversion.
-    Trade deviations from 20-bar SMA.
-    """
-    weights = {sym: 0.0 for sym in symbols}
-
-    for sym in symbols:
-        if sym not in prices or len(prices[sym]) < 21:
-            continue
-        df = prices[sym]
-        closes = df["close"].values
-
-        recent = closes[-20:]
-        current = closes[-1]
-
-        sma = float(np.mean(recent))
-        std = float(np.std(recent))
-
-        if std > 0:
-            zscore = (current - sma) / std
-            if abs(zscore) >= 1.0:
-                weights[sym] = -np.sign(zscore) * min(abs(zscore) * 0.1, 0.15)
-
-    return weights
+def _compute_sharpe_of_returns(returns: np.ndarray) -> float:
+    """Compute Sharpe-like ratio of a return series."""
+    if len(returns) < 2:
+        return 0.0
+    mean_ret = np.mean(returns)
+    std_ret = np.std(returns, ddof=1)
+    if std_ret > 0:
+        return mean_ret / std_ret
+    return 0.0
 
 
 def trade(
@@ -100,28 +34,68 @@ def trade(
     symbols: list[str],
 ) -> list[float]:
     """
-    Ensemble of two complementary strategies.
+    Sector rotation based on risk-adjusted momentum.
 
-    Weights: 60% VIX regime + 40% z-score
+    1. Compute 10-bar returns for each symbol
+    2. Rank by return/volatility ratio (risk-adjusted momentum)
+    3. Long top 3, short bottom 3 (or flat if in between)
+    4. Scale by VIX level (reduce exposure when high)
     """
-    # Get weights from each strategy
-    vix_weights = _get_vix_momentum_weights(prices, symbols)
-    zscore_weights = _get_zscore_weights(prices, symbols)
+    # Get VIX level
+    vix_level = 20.0
+    if "^VIX" in prices and len(prices["^VIX"]) > 0:
+        vix_level = float(prices["^VIX"]["close"].iloc[-1])
 
-    # Ensemble weighting
-    VIX_ALLOC = 0.6
-    ZSCORE_ALLOC = 0.4
+    # Compute risk-adjusted momentum for each symbol
+    momentum_scores = {}
 
-    final_weights = []
     for sym in symbols:
-        combined = VIX_ALLOC * vix_weights.get(
-            sym, 0.0
-        ) + ZSCORE_ALLOC * zscore_weights.get(sym, 0.0)
-        final_weights.append(combined)
+        if sym not in prices or len(prices[sym]) < 11:
+            momentum_scores[sym] = 0.0
+            continue
 
-    # Normalize to ensure leverage <= 1.0
-    total_lev = sum(abs(w) for w in final_weights)
-    if total_lev > 1.0:
-        final_weights = [w / total_lev for w in final_weights]
+        df = prices[sym]
+        closes = df["close"].values
 
-    return final_weights
+        # Get last 10 closes
+        recent = closes[-10:]
+
+        # Compute returns
+        rets = np.diff(recent) / recent[:-1]
+
+        # Risk-adjusted return
+        if len(rets) > 1 and np.std(rets) > 0:
+            score = np.mean(rets) / np.std(rets)
+        else:
+            score = 0.0
+
+        momentum_scores[sym] = score
+
+    # Sort by momentum score
+    sorted_syms = sorted(symbols, key=lambda s: momentum_scores[s])
+
+    # Initialize weights
+    weights = {sym: 0.0 for sym in symbols}
+
+    # Long top 3 performers
+    longs = sorted_syms[-3:]
+    # Short bottom 3 performers
+    shorts = sorted_syms[:3]
+
+    # Equal weight within longs/shorts
+    for sym in longs:
+        weights[sym] = 1.0 / 6.0
+    for sym in shorts:
+        weights[sym] = -1.0 / 6.0
+
+    # Apply VIX-based scaling
+    vix_scale = 1.0
+    if vix_level > 30:
+        vix_scale = 0.3
+    elif vix_level > 25:
+        vix_scale = 0.5
+    elif vix_level > 20:
+        vix_scale = 0.7
+
+    # Return weights in order
+    return [weights[sym] * vix_scale for sym in symbols]
