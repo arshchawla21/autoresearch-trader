@@ -4,3 +4,4 @@ apr03	zscore_mean_reversion	2.8476	0.023188	3.6730	0.8586	-0.027008	0.5124	1.092
 apr03	multitimeframe_momentum	-1.6040	-0.003186	-1.8493	-0.1629	-0.019553	0.4749	0.9770	1413	Multi-timeframe momentum with VIX/TNX regime filter	2026-04-03T01:30:54+11:00
 apr03	ensemble_vix_zscore	3.4012	0.038142	4.2818	1.0393	-0.036699	0.5272	1.1010	1413	60% VIX regime + 40% z-score ensemble	2026-04-03T01:32:12+11:00
 apr03	sector_rotation_rs	-5.3023	-0.025519	-6.1241	-0.7064	-0.036126	0.4834	0.8879	1413	Sector rotation based on risk-adjusted momentum - failed	2026-04-03T01:33:38+11:00
+apr03	atr_adaptive_momentum	-1.1182	-0.001906	-1.3567	-0.0706	-0.027000	0.4862	0.9907	1413	ATR position sizing with EMA crossovers - failed	2026-04-03T01:35:52+11:00
