@@ -1,3 +1,3 @@
 # AutoResearch - Trader
 
-![image](progress.md)
+![image](progress.png)
