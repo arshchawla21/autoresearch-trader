@@ -4,11 +4,15 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 2: Multi-Asset Z-Score Statistical Arbitrage with VIX Filter
+Strategy 3: Multi-Timeframe Momentum with Market Regime Filter
 
-Hypothesis: Price deviations from short-term moving averages create
-mean-reversion opportunities. We scale positions by the z-score of
-the deviation, with position sizing modulated by VIX regime.
+Hypothesis: Combining short-term and medium-term momentum signals
+provides more robust trend detection. We use:
+- Short-term momentum: 5-bar returns
+- Medium-term momentum: 20-bar returns
+- Market regime: VIX trend (rising/falling) and 10Y yield direction
+
+Only trade when both timeframes agree on direction.
 """
 
 from __future__ import annotations
@@ -17,37 +21,44 @@ import numpy as np
 import pandas as pd
 
 
-# Global cache for computed features
-_cache: dict = {}
-
-
-def _compute_zscores(
-    prices: dict[str, pd.DataFrame], symbols: list[str], lookback: int = 20
+def _compute_returns(
+    prices: dict[str, pd.DataFrame], symbols: list[str], lookback: int
 ) -> dict[str, float]:
-    """Compute z-score of current price vs SMA for each symbol."""
-    zscores = {}
+    """Compute returns over lookback periods for all symbols."""
+    returns = {}
     for sym in symbols:
         if sym not in prices or len(prices[sym]) < lookback + 1:
-            zscores[sym] = 0.0
+            returns[sym] = 0.0
             continue
         df = prices[sym]
         closes = df["close"].values
-
-        # Recent window
-        recent = closes[-lookback:]
         current = closes[-1]
-
-        sma = np.mean(recent)
-        std = np.std(recent)
-
-        if std > 0:
-            zscore = (current - sma) / std
+        past = closes[-(lookback + 1)]
+        if past > 0:
+            returns[sym] = (current - past) / past
         else:
-            zscore = 0.0
+            returns[sym] = 0.0
+    return returns
 
-        zscores[sym] = zscore
 
-    return zscores
+def _get_trend(
+    prices: dict[str, pd.DataFrame], symbol: str, lookback: int = 10
+) -> float:
+    """Get recent trend direction (-1 to 1) for an indicator."""
+    if symbol not in prices or len(prices[symbol]) < lookback + 1:
+        return 0.0
+    df = prices[symbol]
+    closes = df["close"].values
+    recent = closes[-lookback:]
+    # Simple linear regression slope normalized by mean
+    x = np.arange(len(recent))
+    slope = np.polyfit(x, recent, 1)[0]
+    mean_price = np.mean(recent)
+    if mean_price > 0:
+        normalized_slope = slope / mean_price
+        # Clamp to [-1, 1] range
+        return np.tanh(normalized_slope * 100)
+    return 0.0
 
 
 def trade(
@@ -56,48 +67,70 @@ def trade(
     symbols: list[str],
 ) -> list[float]:
     """
-    Z-score statistical arbitrage strategy.
+    Multi-timeframe momentum with market regime filter.
 
-    1. Compute z-score of current price vs 20-bar SMA for each symbol
-    2. Go short when z-score > 1.0 (overbought), long when z-score < -1.0 (oversold)
-    3. Position sizes proportional to z-score magnitude
-    4. VIX scaling: reduce exposure when VIX > 25 (high uncertainty)
+    1. Compute 5-bar (short) and 20-bar (medium) returns
+    2. Only take positions when both agree in direction
+    3. Position strength = average of short and medium momentum
+    4. Scale by VIX trend (reduce size when VIX rising sharply)
+    5. Use 10Y yield trend as additional risk-off filter
     """
-    # Get VIX for scaling
-    vix_sym = "^VIX"
-    vix_value = 20.0  # default
-    if vix_sym in prices and len(prices[vix_sym]) > 0:
-        vix_value = prices[vix_sym]["close"].iloc[-1]
+    # Compute momentum signals
+    short_ret = _compute_returns(prices, symbols, lookback=5)
+    medium_ret = _compute_returns(prices, symbols, lookback=20)
 
-    # Compute z-scores
-    zscores = _compute_zscores(prices, symbols, lookback=20)
+    # Get market regime indicators
+    vix_trend = _get_trend(prices, "^VIX", lookback=10)
+    tnx_trend = _get_trend(prices, "^TNX", lookback=10)
 
-    # Z-score thresholds
-    Z_THRESHOLD = 1.0
-    MAX_POS_SIZE = 0.15  # max 15% per position
+    # Current VIX level
+    vix_level = 20.0
+    if "^VIX" in prices and len(prices["^VIX"]) > 0:
+        vix_level = prices["^VIX"]["close"].iloc[-1]
 
     weights = []
     for sym in symbols:
-        z = zscores.get(sym, 0.0)
+        s = short_ret.get(sym, 0.0)
+        m = medium_ret.get(sym, 0.0)
 
-        if abs(z) < Z_THRESHOLD:
-            # No signal
+        # Only trade when both timeframes agree
+        if s * m <= 0:  # Different signs or one is zero
             weights.append(0.0)
-        else:
-            # Position inversely proportional to z-score (mean reversion)
-            # High positive z -> short, High negative z -> long
-            raw_weight = -np.sign(z) * min(abs(z) * 0.1, MAX_POS_SIZE)
-            weights.append(raw_weight)
+            continue
+
+        # Average momentum
+        avg_mom = (s + m) / 2
+
+        # Position size based on momentum magnitude
+        # Scale to reasonable range (-0.15 to 0.15 per position)
+        pos_size = np.sign(avg_mom) * min(abs(avg_mom) * 5, 0.15)
+
+        weights.append(pos_size)
 
     # Normalize to leverage <= 1.0
-    total_leverage = sum(abs(w) for w in weights)
-    if total_leverage > 1.0:
-        weights = [w / total_leverage for w in weights]
+    total_lev = sum(abs(w) for w in weights)
+    if total_lev > 1.0:
+        weights = [w / total_lev for w in weights]
 
-    # VIX-based scaling: reduce exposure in high vol
-    if vix_value > 25:
-        weights = [w * 0.5 for w in weights]  # 50% reduction
-    elif vix_value > 20:
-        weights = [w * 0.75 for w in weights]  # 25% reduction
+    # Regime-based scaling
+    scale = 1.0
+
+    # Reduce exposure when VIX is rising (volatility expansion)
+    if vix_trend > 0.3:
+        scale *= 0.6
+    elif vix_trend > 0.1:
+        scale *= 0.8
+
+    # Reduce exposure when yields rising rapidly (tightening)
+    if tnx_trend > 0.5:
+        scale *= 0.7
+
+    # Cap positions when VIX very high (uncertainty)
+    if vix_level > 30:
+        scale *= 0.5
+    elif vix_level > 25:
+        scale *= 0.75
+
+    weights = [w * scale for w in weights]
 
     return weights
