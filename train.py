@@ -4,11 +4,15 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 6: Adaptive Momentum with ATR-Based Position Sizing
+Strategy 7: Fading Short-Term Noise with Trend Confirmation
 
-Hypothesis: Volatility-adjusted position sizing using ATR should
-improve risk-adjusted returns. We use EMA crossover signals scaled
-by inverse volatility.
+Hypothesis: 1-bar moves are often noise (mean-reverting), but if they
+align with medium-term trend, they have higher probability of continuing.
+We look for:
+- 1-bar momentum (immediate move)
+- 15-bar trend (directional bias)
+- When they agree -> stronger signal
+- When they disagree -> fade the 1-bar move
 """
 
 from __future__ import annotations
@@ -17,98 +21,65 @@ import numpy as np
 import pandas as pd
 
 
-def _compute_ema(prices: np.ndarray, period: int) -> float:
-    """Compute EMA for the given price series."""
-    if len(prices) < period:
-        return float(prices[-1]) if len(prices) > 0 else 0.0
-
-    alpha = 2.0 / (period + 1)
-    ema = float(prices[0])
-    for price in prices[1:]:
-        ema = alpha * float(price) + (1 - alpha) * ema
-    return ema
-
-
-def _compute_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Compute Average True Range."""
-    if len(df) < period + 1:
-        return 0.0
-
-    highs = df["high"].values
-    lows = df["low"].values
-    closes = df["close"].values
-
-    tr_values = []
-    for i in range(1, len(closes)):
-        tr1 = highs[i] - lows[i]
-        tr2 = abs(highs[i] - closes[i - 1])
-        tr3 = abs(lows[i] - closes[i - 1])
-        tr_values.append(max(tr1, tr2, tr3))
-
-    if len(tr_values) >= period:
-        recent_tr = tr_values[-period:]
-        return float(np.mean(recent_tr))
-    return 0.0
-
-
 def trade(
     prices: dict[str, pd.DataFrame],
     current_idx: int,
     symbols: list[str],
 ) -> list[float]:
     """
-    Adaptive momentum with ATR position sizing.
+    Fade noise strategy with trend alignment.
 
-    1. EMA 12/26 crossover for trend direction
-    2. Position size = signal strength / ATR (volatility adjustment)
-    3. VIX-based overall exposure cap
+    For each symbol:
+    - Compute 1-bar return (recent move)
+    - Compute 15-bar trend (longer direction)
+    - When both same sign: momentum continuation
+    - When opposite signs: fade the recent move
+    - Position size based on VIX regime
     """
-    # Get VIX for overall exposure
+    # Get VIX level
     vix_level = 20.0
     if "^VIX" in prices and len(prices["^VIX"]) > 0:
         vix_level = float(prices["^VIX"]["close"].iloc[-1])
 
-    raw_weights = []
+    weights = []
 
     for sym in symbols:
-        if sym not in prices or len(prices[sym]) < 30:
-            raw_weights.append(0.0)
+        if sym not in prices or len(prices[sym]) < 16:
+            weights.append(0.0)
             continue
 
         df = prices[sym]
         closes = df["close"].values
 
-        # EMAs
-        ema12 = _compute_ema(closes, 12)
-        ema26 = _compute_ema(closes, 26)
+        # 1-bar momentum
+        mom1 = (closes[-1] - closes[-2]) / closes[-2] if closes[-2] > 0 else 0.0
 
-        # Trend signal
-        if ema26 > 0:
-            trend = (ema12 - ema26) / ema26
+        # 15-bar trend
+        trend15 = (closes[-1] - closes[-16]) / closes[-16] if closes[-16] > 0 else 0.0
+
+        # Determine position
+        if mom1 * trend15 > 0:
+            # Same direction: trend continuation
+            signal = np.sign(mom1)
+            strength = abs(mom1) + abs(trend15) * 0.5
+        elif mom1 * trend15 < 0:
+            # Opposite: fade the recent move (mean reversion)
+            signal = -np.sign(mom1)
+            strength = abs(mom1) * 1.5  # stronger fade signal
         else:
-            trend = 0.0
+            signal = 0.0
+            strength = 0.0
 
-        # ATR for volatility scaling
-        atr = _compute_atr(df, period=14)
-        current_price = float(closes[-1])
-
-        if atr > 0 and current_price > 0:
-            # Inverse vol scaling: lower position in high vol
-            vol_factor = 0.02 / (atr / current_price)  # normalize ATR as % of price
-            vol_factor = min(vol_factor, 2.0)  # cap scaling
-        else:
-            vol_factor = 1.0
-
-        # Position = trend * vol_factor
-        pos = np.sign(trend) * min(abs(trend) * 10 * vol_factor, 0.2)
-        raw_weights.append(pos)
+        # Cap position size
+        pos = signal * min(strength * 2, 0.15)
+        weights.append(pos)
 
     # Normalize
-    total_lev = sum(abs(w) for w in raw_weights)
+    total_lev = sum(abs(w) for w in weights)
     if total_lev > 1.0:
-        raw_weights = [w / total_lev for w in raw_weights]
+        weights = [w / total_lev for w in weights]
 
-    # VIX exposure scaling
+    # VIX scaling: reduce exposure in high vol
     vix_scale = 1.0
     if vix_level > 30:
         vix_scale = 0.4
@@ -117,4 +88,4 @@ def trade(
     elif vix_level > 20:
         vix_scale = 0.8
 
-    return [w * vix_scale for w in raw_weights]
+    return [w * vix_scale for w in weights]
