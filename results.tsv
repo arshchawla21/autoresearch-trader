@@ -1,4 +1,5 @@
-run_tag	strategy_name	sharpe_ratio	total_return	sortino_ratio	calmar_ratio	max_drawdown	win_rate	profit_factor	n_trades	notes	timestampapr03	random_baseline	-3.4622	-0.018178	-4.2436	-0.4166	-0.043637	0.4756	0.9281	1413	Random baseline strategy	2026-04-03T01:24:11+11:00
+run_tag	strategy_name	sharpe_ratio	total_return	sortino_ratio	calmar_ratio	max_drawdown	win_rate	profit_factor	n_trades	notes	timestamp
+apr03	random_baseline	-3.4622	-0.018178	-4.2436	-0.4166	-0.043637	0.4756	0.9281	1413	Random baseline strategy	2026-04-03T01:24:11+11:00
 apr03	vix_regime_momentum	3.4444	0.039164	4.4784	1.0274	-0.03812	0.5074	1.0993	1413	VIX regime switch: high vol=mean-reversion, low vol=momentum	2026-04-03T01:25:31+11:00
 apr03	zscore_mean_reversion	2.8476	0.023188	3.6730	0.8586	-0.027008	0.5124	1.0926	1413	Z-score mean reversion with VIX-based position scaling	2026-04-03T01:29:09+11:00
 apr03	multitimeframe_momentum	-1.6040	-0.003186	-1.8493	-0.1629	-0.019553	0.4749	0.9770	1413	Multi-timeframe momentum with VIX/TNX regime filter	2026-04-03T01:30:54+11:00
@@ -8,3 +9,4 @@ apr03	atr_adaptive_momentum	-1.1182	-0.001906	-1.3567	-0.0706	-0.027000	0.4862	0
 apr03	fade_noise_trend	0.0796	0.003693	0.1138	0.6994	-0.005280	0.4890	1.1032	1413	Fade 1-bar noise with 15-bar trend alignment	2026-04-03T01:38:15+11:00
 apr03	linear_ml_model	-26.8941	-0.000422	-25.9964	-0.5368	-0.000786	0.5173	0.9174	1413	Linear regression on momentum features - flat results	2026-04-03T01:45:03+11:00
 apr03	improved_vix_regime	-2.0854	-0.000740	-2.1770	-0.0613	-0.012075	0.5322	0.9875	1413	Improved VIX regime with dynamic sizing - didn't improve	2026-04-03T01:47:58+11:00
+apr03	optimized_vix_regime	3.4444	0.039164	4.4784	1.0274	-0.03812	0.5074	1.0993	1413	Optimized VIX regime with yield curve filter - matches original	2026-04-03T01:50:05+11:00

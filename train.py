@@ -4,12 +4,13 @@ train.py — Strategy Implementation
 ====================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 9: Improved VIX Regime with Dynamic Position Sizing
+Strategy 10: Optimized VIX Regime Momentum
 
-Based on the successful VIX regime strategy (Sharpe 3.44), this version:
-- Uses smarter position sizing based on signal strength
-- Adds correlation filtering to avoid concentrated exposure
-- Uses dollar index (^TNX) as additional regime indicator
+The original VIX regime strategy achieved Sharpe 3.44.
+This optimized version:
+- Uses VIX level to select momentum vs mean-reversion
+- Takes top 3 / bottom 3 performers based on 5-bar returns
+- Adds modest yield curve signal (^TNX trend)
 """
 
 from __future__ import annotations
@@ -18,136 +19,78 @@ import numpy as np
 import pandas as pd
 
 
-def _compute_returns(
-    prices: dict[str, pd.DataFrame], symbols: list[str], lookback: int
-) -> dict[str, float]:
-    """Compute returns for all symbols."""
-    returns = {}
-    for sym in symbols:
-        if sym not in prices or len(prices[sym]) < lookback + 1:
-            returns[sym] = 0.0
-            continue
-        df = prices[sym]
-        closes = df["close"].values
-        current = closes[-1]
-        past = closes[-(lookback + 1)]
-        if past > 0:
-            returns[sym] = (current - past) / past
-        else:
-            returns[sym] = 0.0
-    return returns
-
-
-def _get_market_context(prices: dict[str, pd.DataFrame]) -> dict:
-    """Get market regime indicators."""
-    context = {"vix": 20.0, "vix_trend": 0.0, "tnx": 4.0}
-
-    # VIX level and trend
-    if "^VIX" in prices and len(prices["^VIX"]) >= 10:
-        vix_df = prices["^VIX"]
-        vix_values = vix_df["close"].values
-        context["vix"] = float(vix_values[-1])
-        # 5-bar trend
-        if len(vix_values) >= 6:
-            context["vix_trend"] = (
-                float(vix_values[-1] - vix_values[-6]) / vix_values[-6]
-                if vix_values[-6] > 0
-                else 0.0
-            )
-
-    # 10Y yield
-    if "^TNX" in prices and len(prices["^TNX"]) > 0:
-        context["tnx"] = float(prices["^TNX"]["close"].iloc[-1])
-
-    return context
-
-
 def trade(
     prices: dict[str, pd.DataFrame],
     current_idx: int,
     symbols: list[str],
 ) -> list[float]:
     """
-    Improved VIX regime strategy with dynamic sizing.
+    Optimized VIX regime-based momentum/mean-reversion strategy.
 
     Core logic:
-    - High VIX (> 22): Mean-reversion on extreme movers
-    - Low VIX (<= 22): Momentum continuation
-    - Position sizes scaled by signal strength and VIX level
+    - VIX > 20: Mean-reversion regime (fade strong moves)
+    - VIX <= 20: Momentum regime (follow trends)
+    - Long/short top/bottom 3 performers based on 5-bar returns
     """
-    # Get market context
-    ctx = _get_market_context(prices)
-    vix = ctx["vix"]
-    vix_trend = ctx["vix_trend"]
+    # Get current VIX level
+    vix_sym = "^VIX"
+    if vix_sym not in prices or len(prices[vix_sym]) < 5:
+        return [0.0] * len(symbols)
 
-    # Dynamic VIX threshold based on recent trend
-    vix_threshold = 22.0
-    if vix_trend > 0.05:  # Rising VIX, use lower threshold
-        vix_threshold = 20.0
-    elif vix_trend < -0.05:  # Falling VIX, use higher threshold
-        vix_threshold = 24.0
+    vix_df = prices[vix_sym]
+    current_vix = float(vix_df["close"].iloc[-1])
 
-    high_vol_regime = vix > vix_threshold
+    # VIX regime
+    VIX_THRESHOLD = 20.0
+    high_vol_regime = current_vix > VIX_THRESHOLD
 
-    # Compute momentum over different lookbacks
-    ret_3 = _compute_returns(prices, symbols, 3)
-    ret_5 = _compute_returns(prices, symbols, 5)
+    # Optional: Check 10Y yield trend for additional context
+    tnx_sym = "^TNX"
+    tnx_trend = 0.0
+    if tnx_sym in prices and len(prices[tnx_sym]) >= 5:
+        tnx_values = prices[tnx_sym]["close"].values
+        if tnx_values[-5] > 0:
+            tnx_trend = (tnx_values[-1] - tnx_values[-5]) / tnx_values[-5]
 
-    # Combined momentum score (weighted average)
-    momentum = {}
+    # Compute 5-bar returns for all tradeable symbols
+    returns = {}
     for sym in symbols:
-        momentum[sym] = 0.6 * ret_5.get(sym, 0.0) + 0.4 * ret_3.get(sym, 0.0)
+        if sym not in prices or len(prices[sym]) < 6:
+            returns[sym] = 0.0
+            continue
+        df = prices[sym]
+        recent_close = float(df["close"].iloc[-1])
+        past_close = float(df["close"].iloc[-6])
+        if past_close > 0:
+            ret = (recent_close - past_close) / past_close
+        else:
+            ret = 0.0
+        returns[sym] = ret
 
-    # Sort by momentum
-    sorted_syms = sorted(symbols, key=lambda s: momentum[s])
+    # Sort by returns
+    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
 
     # Initialize weights
     weights = {sym: 0.0 for sym in symbols}
 
-    # Select top and bottom performers
-    n_positions = 3  # number of longs and shorts
-
+    # Select positions based on regime
     if high_vol_regime:
-        # Mean-reversion: fade the extremes
-        longs = sorted_syms[:n_positions]  # worst performers
-        shorts = sorted_syms[-n_positions:]  # best performers
-
-        for sym in longs:
-            # Scale by how extreme the move was
-            strength = min(abs(momentum[sym]) * 5, 0.25)
-            weights[sym] = strength
-        for sym in shorts:
-            strength = min(abs(momentum[sym]) * 5, 0.25)
-            weights[sym] = -strength
+        # Mean-reversion: long worst, short best
+        for sym in sorted_syms[:3]:
+            weights[sym] = 1.0 / 6.0
+        for sym in sorted_syms[-3:]:
+            weights[sym] = -1.0 / 6.0
     else:
-        # Momentum: follow the trend
-        longs = sorted_syms[-n_positions:]  # best performers
-        shorts = sorted_syms[:n_positions]  # worst performers
+        # Momentum: long best, short worst
+        for sym in sorted_syms[-3:]:
+            weights[sym] = 1.0 / 6.0
+        for sym in sorted_syms[:3]:
+            weights[sym] = -1.0 / 6.0
 
-        for sym in longs:
-            strength = min(abs(momentum[sym]) * 5, 0.25)
-            weights[sym] = strength
-        for sym in shorts:
-            strength = min(abs(momentum[sym]) * 5, 0.25)
-            weights[sym] = -strength
-
-    # Convert to list
-    weight_list = [weights[sym] for sym in symbols]
-
-    # Normalize to leverage <= 1.0
-    total_lev = sum(abs(w) for w in weight_list)
-    if total_lev > 1.0:
-        weight_list = [w / total_lev for w in weight_list]
-
-    # VIX-based exposure scaling
+    # Yield curve adjustment: if yields rising rapidly, reduce exposure
     exposure_scale = 1.0
-    if vix > 35:
-        exposure_scale = 0.3
-    elif vix > 30:
-        exposure_scale = 0.5
-    elif vix > 25:
-        exposure_scale = 0.7
-    elif vix > vix_threshold:
-        exposure_scale = 0.85
+    if tnx_trend > 0.02:  # >2% move in yields
+        exposure_scale = 0.8
 
-    return [w * exposure_scale for w in weight_list]
+    # Return weights in order
+    return [weights[sym] * exposure_scale for sym in symbols]
