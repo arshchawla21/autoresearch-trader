@@ -1,6 +1,5 @@
 run_tag	strategy_name	sharpe_ratio	total_return	sortino_ratio	calmar_ratio	max_drawdown	win_rate	profit_factor	n_trades	notes	timestamp
 apr03	random_baseline	-3.4622	-0.018178	-4.2436	-0.4166	-0.043637	0.4756	0.9281	1413	Random baseline strategy	2026-04-03T01:24:11+11:00
-apr03	vix_regime_momentum	3.4444	0.039164	4.4784	1.0274	-0.03812	0.5074	1.0993	1413	VIX regime switch: high vol=mean-reversion, low vol=momentum	2026-04-03T01:25:31+11:00
 apr03	zscore_mean_reversion	2.8476	0.023188	3.6730	0.8586	-0.027008	0.5124	1.0926	1413	Z-score mean reversion with VIX-based position scaling	2026-04-03T01:29:09+11:00
 apr03	multitimeframe_momentum	-1.6040	-0.003186	-1.8493	-0.1629	-0.019553	0.4749	0.9770	1413	Multi-timeframe momentum with VIX/TNX regime filter	2026-04-03T01:30:54+11:00
 apr03	ensemble_vix_zscore	3.4012	0.038142	4.2818	1.0393	-0.036699	0.5272	1.1010	1413	60% VIX regime + 40% z-score ensemble	2026-04-03T01:32:12+11:00
