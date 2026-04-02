@@ -7,3 +7,4 @@ apr03	sector_rotation_rs	-5.3023	-0.025519	-6.1241	-0.7064	-0.036126	0.4834	0.88
 apr03	atr_adaptive_momentum	-1.1182	-0.001906	-1.3567	-0.0706	-0.027000	0.4862	0.9907	1413	ATR position sizing with EMA crossovers - failed	2026-04-03T01:35:52+11:00
 apr03	fade_noise_trend	0.0796	0.003693	0.1138	0.6994	-0.005280	0.4890	1.1032	1413	Fade 1-bar noise with 15-bar trend alignment	2026-04-03T01:38:15+11:00
 apr03	linear_ml_model	-26.8941	-0.000422	-25.9964	-0.5368	-0.000786	0.5173	0.9174	1413	Linear regression on momentum features - flat results	2026-04-03T01:45:03+11:00
+apr03	improved_vix_regime	-2.0854	-0.000740	-2.1770	-0.0613	-0.012075	0.5322	0.9875	1413	Improved VIX regime with dynamic sizing - didn't improve	2026-04-03T01:47:58+11:00
