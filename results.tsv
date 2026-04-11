@@ -56,3 +56,4 @@ apr12b	squeeze_fade	-2.9822	-0.011586	-1.8289	-0.4314	-0.026859	0.4199	0.9538	61
 apr12b	v36_wick_confirm	-3.7861	0.006951	-1.1456	1.1695	-0.005944	0.4610	1.1194	154	v36 + rejection wick ge 40pct of bar range - win record 46.1pct but only 154 trades 0.7/day	2026-04-12T23:50:00
 apr12b	v36_gold_corr_gate	-6.1661	0.003986	-1.0831	0.5214	-0.007645	0.4746	1.1845	59	v36 + JPY-gold corr>0 regime - win record 47.46pct but gate too strict 0.3 trades/day	2026-04-13T00:10:00
 apr12b	v36_2of3_xasset	-6.5278	-0.003616	-1.5763	-0.4106	-0.008807	0.4070	0.8995	86	v36 + require 2-of-3 xasset agree - stricter actually hurts 40.7pct any-1 is optimal	2026-04-13T00:30:00
+apr12b	v36_atr_brackets	-1.7546	0.013324	-0.9041	0.7912	-0.016840	0.4505	1.0750	455	NEW CHAMPION v36 + TP=1.5xATR SL=1.0xATR bounded - return +1.33pct Sharpe -1.75 best yet	2026-04-13T00:50:00

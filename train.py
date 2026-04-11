@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v43-v36-2of3-xasset
-==============================
-Hypothesis: v36 requires ANY 1 of gold/DXY/Nikkei to confirm. Tighten
-the structure to require at least 2 of 3. Two independent cross-asset
-peers confirming is a stronger macro signal than one, reducing
-false-positive entries on noise correlation.
+train.py — v44-v36-atr-brackets
+===============================
+Hypothesis: v36 uses fixed 15/10 pips regardless of volatility regime.
+In quiet conditions 15 pips is a huge target; in volatile it is tiny
+noise. Scale TP/SL to 20-bar ATR: TP = 1.5*ATR, SL = 1.0*ATR. Same
+1.5:1 structure, but adapts to current realized vol. Bounded to
+[8, 25] pips for TP and [6, 18] pips for SL so we stay inside the
+programme's spec.
 """
 
 from __future__ import annotations
@@ -13,8 +15,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TP_PIPS = 15.0
-SL_PIPS = 10.0
+PIP = 0.01
+TP_BASE = 15.0
+SL_BASE = 10.0
+TP_MIN, TP_MAX = 8.0, 25.0
+SL_MIN, SL_MAX = 6.0, 18.0
+ATR_LB = 20
 
 Z_LB = 20
 Z_ENTRY = 1.2
@@ -102,15 +108,33 @@ def _vol_ok(pair: pd.DataFrame) -> bool:
     return last > med
 
 
-def _crossasset_count(pair: pd.DataFrame, prices: dict, want_long: bool) -> int:
+def _atr_pips(pair: pd.DataFrame, n: int) -> float:
+    if len(pair) < n + 1:
+        return TP_BASE  # fallback
+    highs = pair["high"].values.astype(float)
+    lows = pair["low"].values.astype(float)
+    closes = pair["close"].values.astype(float)
+    tr = np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(
+            np.abs(highs[1:] - closes[:-1]),
+            np.abs(lows[1:] - closes[:-1]),
+        ),
+    )
+    if len(tr) < n:
+        return TP_BASE
+    return float(tr[-n:].mean()) / PIP
+
+
+def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
     if len(pair) < LB_SHORT + 1:
-        return 0
+        return False
     ts_now = pair.index[-1]
     ts_prev = pair.index[-1 - LB_SHORT]
     p_now = float(pair["close"].iloc[-1])
     p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
     if p_prev <= 0:
-        return 0
+        return False
     jr = float(np.log(p_now / p_prev))
 
     def _r(other):
@@ -129,35 +153,40 @@ def _crossasset_count(pair: pd.DataFrame, prices: dict, want_long: bool) -> int:
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
 
-    cnt = 0
     if want_long:
         if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
-            cnt += 1
+            return True
         if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
-            cnt += 1
+            return True
         if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
-            cnt += 1
+            return True
+        return False
     else:
         if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
-            cnt += 1
+            return True
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
-            cnt += 1
+            return True
         if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            cnt += 1
-    return cnt
+            return True
+        return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+        return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
+
+    atr = _atr_pips(pair, ATR_LB)
+    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
+    sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
+
     s = _pullback_signal(pair)
     if s == 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if not _vol_ok(pair):
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if _crossasset_count(pair, prices, want_long=(s == 1)) >= 2:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
         direction = 0
-    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
