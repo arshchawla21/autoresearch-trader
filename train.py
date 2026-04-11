@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v61-v59-vol-spike-skip
-=================================
-Hypothesis: v59 takes every qualifying pullback regardless of regime.
-Vol spikes (top decile of recent ATR distribution) are where mean
-reversion fails and trends/breakouts rule. Skip trades when current
-ATR is in the top 10% of 500-bar ATR distribution — preserves normal
-and dead-regime trades but removes turbulent ones.
+train.py — v62-v61-middle-80
+============================
+Hypothesis: v61 skips top-decile ATR spikes. Also skip bottom-decile
+dead markets — in dead regimes pullbacks are noise and the cross-asset
+confirm over 4 bars has no information. Trade only when vol is in the
+middle 80% of the 500-bar distribution.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ ATR_LB = 20
 ATR_MED_LB = 200
 ATR_SPIKE_LB = 500
 ATR_SPIKE_Q = 0.90
+ATR_DEAD_Q = 0.10
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -211,12 +211,14 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    # Vol spike skip: if current ATR is in top decile of recent history, stand aside
+    # Vol regime gate: stand aside outside the middle 80% of 500-bar ATR distribution
     atr_hist = _atr_series(pair, ATR_LB)
     if len(atr_hist) >= ATR_SPIKE_LB:
         cur_atr = float(atr_hist[-1])
-        thresh = float(np.quantile(atr_hist[-ATR_SPIKE_LB:], ATR_SPIKE_Q))
-        if cur_atr > thresh:
+        recent = atr_hist[-ATR_SPIKE_LB:]
+        hi_thresh = float(np.quantile(recent, ATR_SPIKE_Q))
+        lo_thresh = float(np.quantile(recent, ATR_DEAD_Q))
+        if cur_atr > hi_thresh or cur_atr < lo_thresh:
             return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     z_entry = _adaptive_z(pair)
