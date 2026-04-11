@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v22-v21-plus-tnx
-===========================
-Hypothesis: v21 was the champion (+0.50%, 43.83% win). Add a fourth
-cross-asset confirmation path: TNX (US 10Y yield futures proxy) — yields
-and USD/JPY should be positively correlated (higher yields → stronger
-USD → JPY up). JPY-TNX anti-correlation means one lagged the other; fade
-JPY's move.
+train.py — v23-rsi-or-zscore
+============================
+Hypothesis: v21's pullback signal is z_20 < -1.2. Adding RSI-14 as an
+OR'd pullback detector (long if RSI < 32, short if > 68) should fire
+on price dips that are *shaped* differently from a z-score extreme —
+e.g. a slow grind down is detected by RSI but not by a 20-bar z. Still
+require 24h trend alignment and any one cross-asset confirmation.
 """
 
 from __future__ import annotations
@@ -19,28 +19,56 @@ SL_PIPS = 10.0
 
 Z_LB = 20
 Z_ENTRY = 1.2
+RSI_LB = 14
+RSI_LOW = 32.0
+RSI_HIGH = 68.0
 TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
 
-def _v11_signal(pair: pd.DataFrame) -> int:
-    if len(pair) < TREND_LB + 1:
+def _rsi(closes: np.ndarray, n: int) -> float:
+    if len(closes) < n + 1:
+        return float("nan")
+    diffs = np.diff(closes[-(n + 1):])
+    ups = np.maximum(diffs, 0.0)
+    downs = np.maximum(-diffs, 0.0)
+    avg_up = ups.mean()
+    avg_down = downs.mean()
+    if avg_down <= 0 and avg_up <= 0:
+        return 50.0
+    if avg_down <= 0:
+        return 100.0
+    rs = avg_up / avg_down
+    return float(100.0 - 100.0 / (1.0 + rs))
+
+
+def _pullback_signal(pair: pd.DataFrame) -> int:
+    if len(pair) < max(Z_LB, RSI_LB + 1, TREND_LB) + 1:
         return 0
     closes = pair["close"].values.astype(float)
     last = float(closes[-1])
-    win = closes[-Z_LB:]
-    sd = float(win.std(ddof=1))
-    if sd <= 0:
-        return 0
-    z = (last - float(win.mean())) / sd
+
+    # trend
     prev = float(closes[-1 - TREND_LB])
     if prev <= 0:
         return 0
     trend = last / prev - 1.0
-    if trend > 0 and z < -Z_ENTRY:
+
+    # z-score
+    win = closes[-Z_LB:]
+    sd = float(win.std(ddof=1))
+    z = (last - float(win.mean())) / sd if sd > 0 else 0.0
+
+    # RSI
+    rsi = _rsi(closes, RSI_LB)
+
+    long_pullback = (z < -Z_ENTRY) or (not np.isnan(rsi) and rsi < RSI_LOW)
+    short_pullback = (z > Z_ENTRY) or (not np.isnan(rsi) and rsi > RSI_HIGH)
+
+    if trend > 0 and long_pullback:
         return 1
-    if trend < 0 and z > Z_ENTRY:
+    if trend < 0 and short_pullback:
         return -1
     return 0
 
@@ -70,33 +98,25 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     gold = prices.get("GC=F")
     dxy = prices.get("DX-Y.NYB")
     nk = prices.get("^N225")
-    tnx = prices.get("^TNX")
 
     gr = _ret(gold["close"], ts_now, ts_prev) if gold is not None else float("nan")
     dr = _ret(dxy["close"], ts_now, ts_prev) if dxy is not None else float("nan")
     nr = _ret(nk["close"], ts_now, ts_prev) if nk is not None else float("nan")
-    tr = _ret(tnx["close"], ts_now, ts_prev) if tnx is not None else float("nan")
 
     if want_long:
-        # Long ⇒ JPY should revert up. Any one confirmation is enough.
         if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
             return True
         if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
             return True
         if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
             return True
-        if not np.isnan(tr) and jr < -MIN_MOVE and tr > MIN_MOVE:
-            return True
         return False
     else:
-        # Short ⇒ JPY should revert down.
         if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
             return True
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
             return True
         if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            return True
-        if not np.isnan(tr) and jr > MIN_MOVE and tr < -MIN_MOVE:
             return True
         return False
 
@@ -105,11 +125,11 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    s11 = _v11_signal(pair)
-    if s11 == 0:
+    s = _pullback_signal(pair)
+    if s == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if _crossasset_confirms(pair, prices, want_long=(s11 == 1)):
-        direction = s11
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+        direction = s
     else:
         direction = 0
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}

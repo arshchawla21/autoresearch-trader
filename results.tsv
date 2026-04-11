@@ -35,3 +35,4 @@ apr12b	wick_rejection	-5.3767	-0.105502	-5.2090	-0.9426	-0.111927	0.4480	0.8404	
 apr12b	v15_wide_tp	-2.5308	0.003575	-1.2651	0.3169	-0.011283	0.3661	1.0283	295	v15 intersection with TP=20 SL=10 - edge extends to wider target (+0.36%), PF 1.03	2026-04-12T17:20:00
 apr12b	v11_any_crossasset	-2.0935	0.005009	-1.2391	0.3520	-0.014229	0.4383	1.0235	559	v11 + ANY of gold/DXY/Nikkei divergence - best yet, 43.8% win above breakeven 2.5 trades/day	2026-04-12T17:40:00
 apr12b	v21_plus_tnx	-2.4803	-0.004366	-1.5245	-0.2468	-0.017686	0.4286	0.9834	623	Add TNX as 4th cross-asset confirm - TNX is noise, drops win from 43.8 to 42.9	2026-04-12T18:00:00
+apr12b	rsi_or_zscore	-1.9720	0.006936	-1.1806	0.4419	-0.015698	0.4404	1.0317	570	RSI<32 OR z<-1.2 as pullback triggers - new champion 44.04% win +0.69% return	2026-04-12T18:20:00
