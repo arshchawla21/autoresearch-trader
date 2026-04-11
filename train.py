@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v17-gold-div-trend-gate
-==================================
-Hypothesis: v15 intersection (v11 ∩ v4) got 43.6% win, positive return,
-but only 1.3 trades/day — the z-score requirement in v11 was the binding
-constraint. Keep the trend direction gate but drop the z-score, so v4's
-gold divergence fires freely as long as its direction aligns with the
-24h JPY trend. Should triple trade count at similar quality.
+train.py — v18-hour-seasonality
+===============================
+Hypothesis: USD/JPY has systematic intraday bias tied to FX session flows
+(Tokyo fix, London open, NY fix, etc.). Learn the mean 4-bar forward
+log-return per UTC hour from the 90-day warmup — only 24 parameters, low
+overfit risk — and at eval take a position in the direction of that hour's
+bias whenever |bias| is strong enough. Module-level cache for the 24 biases.
 """
 
 from __future__ import annotations
@@ -17,49 +17,48 @@ import pandas as pd
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-TREND_LB = 96
-LB_SHORT = 4
-MIN_MOVE = 0.0005
+FWD_H = 4            # 1h forward label
+BIAS_MIN = 2e-5      # 2bp minimum |bias|
+_HOUR_DIR: np.ndarray | None = None  # shape (24,) of {-1,0,1}
+
+
+def _fit_hour_bias(prices: dict[str, pd.DataFrame]) -> None:
+    global _HOUR_DIR
+    pair = prices["JPY=X"]["close"].astype(float)
+    if len(pair) < 500:
+        return
+    fwd = np.log(pair.shift(-FWD_H) / pair).dropna()
+    idx = fwd.index
+    hours = (
+        idx.tz_convert("UTC").hour.to_numpy()
+        if idx.tzinfo is not None
+        else idx.hour.to_numpy()
+    )
+    dirs = np.zeros(24, dtype=np.int8)
+    vals = fwd.values
+    for h in range(24):
+        mask = hours == h
+        if mask.sum() < 50:
+            continue
+        mean_ret = float(vals[mask].mean())
+        if mean_ret > BIAS_MIN:
+            dirs[h] = 1
+        elif mean_ret < -BIAS_MIN:
+            dirs[h] = -1
+    _HOUR_DIR = dirs
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
+    global _HOUR_DIR
+    if _HOUR_DIR is None:
+        _fit_hour_bias(prices)
+    if _HOUR_DIR is None:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+
     pair = prices.get("JPY=X")
-    gold = prices.get("GC=F")
-    if pair is None or gold is None or len(pair) < TREND_LB + 1:
+    if pair is None or len(pair) == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    pc = pair["close"]
-    closes = pc.values.astype(float)
-    last = float(closes[-1])
-    prev_trend = float(closes[-1 - TREND_LB])
-    if prev_trend <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    trend = last / prev_trend - 1.0
-
-    # v4: 4-bar gold divergence
-    p_prev = float(closes[-1 - LB_SHORT])
-    gc = gold["close"]
-    try:
-        g_now = float(gc.asof(pair.index[-1]))
-        g_prev = float(gc.asof(pair.index[-1 - LB_SHORT]))
-    except Exception:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if np.isnan(g_now) or np.isnan(g_prev) or g_prev <= 0 or p_prev <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    jr = np.log(last / p_prev)
-    gr = np.log(g_now / g_prev)
-
-    gold_sig = 0
-    if jr > MIN_MOVE and gr > MIN_MOVE:
-        gold_sig = -1   # co-move anomaly, fade JPY up
-    elif jr < -MIN_MOVE and gr < -MIN_MOVE:
-        gold_sig = 1
-
-    # Direction gate: must agree with 24h trend direction
-    if gold_sig == 1 and trend > 0:
-        direction = 1
-    elif gold_sig == -1 and trend < 0:
-        direction = -1
-    else:
-        direction = 0
+    ts = pair.index[-1]
+    hour = ts.tz_convert("UTC").hour if ts.tzinfo is not None else ts.hour
+    direction = int(_HOUR_DIR[hour])
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
