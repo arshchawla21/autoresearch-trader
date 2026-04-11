@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v21-v11-any-crossasset
-=================================
-Hypothesis: v15 intersection had only 1.3 trades/day because requiring
-gold co-move is too specific. Keep v11's trend-pullback core but accept
-ANY of three cross-asset confirmations — gold co-move (v4), DXY anti-
-correlation (they should move together), Nikkei anti-correlation (risk-on
-usually couples with JPY weakening). OR-of-cross-asset should roughly 3×
-the trade count while preserving the quality filter.
+train.py — v22-v21-plus-tnx
+===========================
+Hypothesis: v21 was the champion (+0.50%, 43.83% win). Add a fourth
+cross-asset confirmation path: TNX (US 10Y yield futures proxy) — yields
+and USD/JPY should be positively correlated (higher yields → stronger
+USD → JPY up). JPY-TNX anti-correlation means one lagged the other; fade
+JPY's move.
 """
 
 from __future__ import annotations
@@ -71,21 +70,22 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     gold = prices.get("GC=F")
     dxy = prices.get("DX-Y.NYB")
     nk = prices.get("^N225")
+    tnx = prices.get("^TNX")
 
     gr = _ret(gold["close"], ts_now, ts_prev) if gold is not None else float("nan")
     dr = _ret(dxy["close"], ts_now, ts_prev) if dxy is not None else float("nan")
     nr = _ret(nk["close"], ts_now, ts_prev) if nk is not None else float("nan")
+    tr = _ret(tnx["close"], ts_now, ts_prev) if tnx is not None else float("nan")
 
     if want_long:
-        # Long ⇒ JPY should revert up. Confirmations:
-        #   (a) gold also fell (co-move anomaly)
-        #   (b) DXY rose while JPY fell (they should co-move)
-        #   (c) Nikkei rose while JPY fell (risk-on decoupling)
+        # Long ⇒ JPY should revert up. Any one confirmation is enough.
         if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
             return True
         if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
             return True
         if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
+            return True
+        if not np.isnan(tr) and jr < -MIN_MOVE and tr > MIN_MOVE:
             return True
         return False
     else:
@@ -95,6 +95,8 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
             return True
         if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+            return True
+        if not np.isnan(tr) and jr > MIN_MOVE and tr < -MIN_MOVE:
             return True
         return False
 
