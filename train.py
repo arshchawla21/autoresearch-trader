@@ -1,51 +1,46 @@
 #!/usr/bin/env python3
 """
-train.py — Strategy Implementation (USD/JPY 15m forex)
-========================================================
-THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
-
-Strategy v1: Random Baseline
-----------------------------
-At every 15m bar, if flat, flip a 25% biased coin:
-  - 75% stay flat
-  - 12.5% go long
-  - 12.5% go short
-With TP = 15 pips, SL = 10 pips on USD/JPY. That produces ~1 entry attempt
-per hour on average (4 bars × 25% = 1 trade/hr expectation while flat).
-This is the random floor every real strategy must beat.
+train.py — Strategy v2: DXY Momentum Co-Move
+=============================================
+Hypothesis: USD/JPY is dominated by the USD leg intraday. If the broad
+dollar (DX-Y.NYB) has trended up over the last N 15m bars, the pair should
+be biased higher on the next bar — we ride the DXY lead. Symmetric short
+when DXY trends down. Stay flat otherwise.
 """
 
 from __future__ import annotations
 
-import random
-
 import pandas as pd
 
 
-# Baseline TP / SL — every strategy in this project uses fixed-size trades
-# and only decides direction. TP/SL levels may be tuned across experiments.
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-# Fixed RNG so the random baseline is reproducible across runs.
-_RNG = random.Random(42)
+# DXY lookback in 15m bars. 8 bars = 2 hours of dollar direction.
+DXY_LOOKBACK = 8
+# Minimum absolute DXY return (fraction) required to take a trade.
+# 0.05% over 2 hours on DXY is a meaningful directional move.
+DXY_THRESHOLD = 0.0005
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
-    """
-    Called on every 15m bar when the bot is flat.
+    dxy = prices.get("DX-Y.NYB")
+    if dxy is None or len(dxy) < DXY_LOOKBACK + 1:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    Returns a dict:
-        {"direction": -1 | 0 | 1, "tp_pips": float, "sl_pips": float}
+    closes = dxy["close"].dropna()
+    if len(closes) < DXY_LOOKBACK + 1:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    direction  1 → open long USD/JPY at this bar's close
-    direction -1 → open short USD/JPY at this bar's close
-    direction  0 → stay flat
-    """
-    r = _RNG.random()
-    if r < 0.125:
+    recent = float(closes.iloc[-1])
+    past = float(closes.iloc[-DXY_LOOKBACK - 1])
+    if past <= 0:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+
+    dxy_ret = (recent - past) / past
+    if dxy_ret > DXY_THRESHOLD:
         direction = 1
-    elif r < 0.25:
+    elif dxy_ret < -DXY_THRESHOLD:
         direction = -1
     else:
         direction = 0
