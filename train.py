@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v75-v69-xasset-quiet
-===============================
-Hypothesis: v69 requires cross-asset confirm (others moved with JPY).
-Opposite idea: trade when JPY moved *alone* — the xassets are quiet
-(|xasset 4h return| < half MIN_MOVE). Pure JPY noise that has nothing
-to do with macro is most likely to mean-revert cleanly.
+train.py — v76-v69-dual-z
+=========================
+Hypothesis: v69 uses a single 20-bar z-score in the OR oscillator
+family. Add a 40-bar z-score AND-gate: the pullback must be extreme
+on BOTH 20-bar (recent) AND 40-bar (medium) windows. Multi-timeframe
+pullback confirmation should remove one-off fast moves and select
+for genuine reversions.
 """
 
 from __future__ import annotations
@@ -25,9 +26,11 @@ ATR_SPIKE_LB = 500
 ATR_SPIKE_Q = 0.90
 
 Z_LB = 20
+Z_LB_LONG = 40
 Z_ENTRY_BASE = 1.2
 Z_ENTRY_MIN = 0.9
 Z_ENTRY_MAX = 1.8
+Z_LONG_ENTRY = 0.8
 RSI_LB = 14
 RSI_LOW = 32.0
 RSI_HIGH = 68.0
@@ -108,6 +111,10 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
     sd = float(win.std(ddof=1))
     zv = (last - float(win.mean())) / sd if sd > 0 else 0.0
 
+    win_l = closes[idx - Z_LB_LONG + 1 : idx + 1] if idx != -1 else closes[-Z_LB_LONG:]
+    sd_l = float(win_l.std(ddof=1))
+    zv_l = (last - float(win_l.mean())) / sd_l if sd_l > 0 else 0.0
+
     rsi_slice = closes[: idx + 1] if idx != -1 else closes
     rsi_val = _rsi(rsi_slice, RSI_LB)
 
@@ -121,16 +128,19 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    long_pullback = (
+    osc_long = (
         (zv < -z_entry)
         or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
         or (not np.isnan(wr_val) and wr_val < WR_LOW)
     )
-    short_pullback = (
+    osc_short = (
         (zv > z_entry)
         or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
         or (not np.isnan(wr_val) and wr_val > WR_HIGH)
     )
+    # Dual-Z AND gate: require long-window z also on the same side.
+    long_pullback = osc_long and zv_l < -Z_LONG_ENTRY
+    short_pullback = osc_short and zv_l > Z_LONG_ENTRY
     return long_pullback, short_pullback, trend
 
 
@@ -182,21 +192,23 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     gr = _r(prices.get("GC=F"))
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
-    quiet_thresh = MIN_MOVE / 2.0
 
-    # Require JPY meaningful move AND xassets quiet (all below half threshold)
-    if abs(jr) < MIN_MOVE:
+    if want_long:
+        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
+            return True
         return False
-    def quiet(r):
-        return np.isnan(r) or abs(r) < quiet_thresh
-    if not (quiet(gr) and quiet(dr) and quiet(nr)):
+    else:
+        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+            return True
         return False
-    # JPY moved alone - take the pullback signal
-    if want_long and jr < 0:
-        return True
-    if (not want_long) and jr > 0:
-        return True
-    return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
