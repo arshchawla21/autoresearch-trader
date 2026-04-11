@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v50-v47-dead-market
-==============================
-Hypothesis: v47 fires across all regimes. In very quiet markets
-(lowest 10% ATR) the oscillator signals are dominated by noise and
-there is no real move to catch. Skip when 20-bar ATR is below the 10th
-percentile of its own 200-bar distribution. Structural regime filter.
+train.py — v51-v47-3bar-persist
+===============================
+Hypothesis: v47 requires pullback to hold on 2 consecutive bars. Try
+3 consecutive — even stricter persistence. Should lift quality at
+some frequency cost. Test where the sweet spot lives.
 """
 
 from __future__ import annotations
@@ -110,9 +109,10 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
 def _pullback_signal(pair: pd.DataFrame) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1)
     lp2, sp2, _ = _pullback_at(pair, 2)
-    if tr1 > 0 and lp1 and lp2:
+    lp3, sp3, _ = _pullback_at(pair, 3)
+    if tr1 > 0 and lp1 and lp2 and lp3:
         return 1
-    if tr1 < 0 and sp1 and sp2:
+    if tr1 < 0 and sp1 and sp2 and sp3:
         return -1
     return 0
 
@@ -199,29 +199,6 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     atr = _atr_pips(pair, ATR_LB)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
-
-    # dead-market filter: skip when ATR is in bottom 10% of 200-bar window
-    if len(pair) >= 220:
-        highs = pair["high"].values.astype(float)
-        lows = pair["low"].values.astype(float)
-        closes_all = pair["close"].values.astype(float)
-        tr = np.maximum(
-            highs[1:] - lows[1:],
-            np.maximum(
-                np.abs(highs[1:] - closes_all[:-1]),
-                np.abs(lows[1:] - closes_all[:-1]),
-            ),
-        )
-        # per-bar ATR20 over the last 200 bars
-        atr_series = np.array([tr[-(200 + 20 - i):-(20 - i)].mean() if (20 - i) > 0
-                               else tr[-200:].mean() for i in range(200)])
-        # simpler: take last 200 rolling ATR20 values
-        atr_hist = np.convolve(tr, np.ones(ATR_LB) / ATR_LB, mode="valid")
-        atr_window = atr_hist[-200:] if len(atr_hist) >= 200 else atr_hist
-        cur_atr = atr_hist[-1]
-        lo_q = float(np.quantile(atr_window, 0.10))
-        if cur_atr < lo_q:
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     s = _pullback_signal(pair)
     if s == 0:
