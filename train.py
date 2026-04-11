@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v99-calm-bar
-========================
-Hypothesis: v80 champion fires pullback entries regardless of
-current-bar range shape. Mean-reversion works best after vol
-has been absorbed — a small/calm bar following a stretched
-window. Add a filter: current-bar range must be < 0.8× the
-prior 20-bar average range. Keeps entries on compressed bars
-where reversals are more likely to hold.
+train.py — v100-vix-regime-flip
+================================
+Hypothesis: v80 always fades pullbacks. But in high-vol regimes
+(^VIX > 70th percentile over 500 bars), moves trend and MR loses.
+Flip direction when regime is high-vol: same pullback signal,
+inverted sign → momentum continuation. Low-vol keeps MR.
 """
 
 from __future__ import annotations
@@ -223,17 +221,20 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    # Calm-bar filter: current range < 0.8 × prior 20-bar avg range
-    highs_arr = pair["high"].values.astype(float)
-    lows_arr = pair["low"].values.astype(float)
-    if len(highs_arr) >= 21:
-        cur_rng = highs_arr[-1] - lows_arr[-1]
-        prior_rng = float((highs_arr[-21:-1] - lows_arr[-21:-1]).mean())
-        if prior_rng > 0 and cur_rng > 0.8 * prior_rng:
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    # Regime flip: when ^VIX in top 30% of last 500 bars, trend not MR
+    vix = prices.get("^VIX")
+    regime_high = False
+    if vix is not None:
+        vc = vix["close"].dropna()
+        if len(vc) >= 500:
+            w = vc.iloc[-500:]
+            thr = float(w.quantile(0.7))
+            if float(vc.iloc[-1]) > thr:
+                regime_high = True
+    effective_s = -s if regime_high else s
 
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = s
+    if _crossasset_confirms(pair, prices, want_long=(effective_s == 1)):
+        direction = effective_s
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}

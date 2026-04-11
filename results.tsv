@@ -112,3 +112,4 @@ apr12b	v96-swing-1to1	-5.0387	0.005066	-1.1121	0.8353	-0.006065	0.5630	1.1202	13
 apr12b	v97-v14-replay	-4.8668	-0.111710	-5.0334	-0.8436	-0.132417	0.3945	0.8543	1896	historic v14 fails on OANDA, MR regime gone	2026-04-12T00:00:00
 apr12b	v98-v14-momentum	-4.9656	-0.107517	-5.1016	-0.9442	-0.113871	0.3911	0.8456	1713	inverted v14 also fails, z-extreme has no directional edge	2026-04-12T00:00:00
 apr12b	v99-calm-bar	-4.3635	0.000484	-1.5151	0.0598	-0.008096	0.4444	1.0085	153	calm-bar filter kills best reversal entries	2026-04-12T00:00:00
+apr12b	v100-vix-regime-flip	-1.1129	0.029112	-0.5213	3.9672	-0.007338	0.4942	1.2494	342	flip direction in top-30% VIX regime, marginal	2026-04-12T00:00:00
