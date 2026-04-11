@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v6-shock-ride
-========================
-Hypothesis (flip of v5): 2-bar shocks don't revert, they continue. v5 fading
->2σ shocks produced a 39% win rate — the mirror image is the edge. Ride
-the shock: when the 2-bar z of log-returns exceeds 2σ, trade *with* the
-direction, TP=15 / SL=10.
+train.py — v7-nikkei-lead-tokyo
+===============================
+Hypothesis: during the Tokyo session (00-05 UTC), Nikkei 225 direction
+leads USD/JPY — when Nikkei rallies, BoJ / risk-on flows push JPY weaker
+(USD/JPY up). Trade USD/JPY only in Tokyo hours, aligned with the 2h
+Nikkei return.
 """
 
 from __future__ import annotations
@@ -16,31 +16,34 @@ import pandas as pd
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-SHOCK_LB = 2          # 30-minute shock window
-VOL_LB = 60           # ~15h rolling stdev
-Z_ENTRY = 2.0
+NK_LB = 8                  # 2h Nikkei lookback
+NK_THRESHOLD = 0.0015      # 15bps Nikkei move required
+TOKYO_HOURS = set(range(0, 6))  # 00:00–05:59 UTC
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < VOL_LB + SHOCK_LB + 2:
+    nk = prices.get("^N225")
+    if pair is None or nk is None or len(pair) == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    closes = pair["close"].values[-(VOL_LB + SHOCK_LB + 5):].astype(float)
-    # 2-bar log returns
-    ret2 = np.log(closes[SHOCK_LB:] / closes[:-SHOCK_LB])
-    if len(ret2) < VOL_LB:
+    ts = pair.index[-1]
+    hour_utc = ts.tz_convert("UTC").hour if ts.tzinfo is not None else ts.hour
+    if hour_utc not in TOKYO_HOURS:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    recent = ret2[-VOL_LB:]
-    sd = float(recent.std(ddof=1))
-    if sd <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    last = float(ret2[-1])
-    z = last / sd
 
-    if z > Z_ENTRY:
+    nk_close = nk["close"]
+    if len(nk_close) < NK_LB + 1:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    now = float(nk_close.iloc[-1])
+    prev = float(nk_close.iloc[-1 - NK_LB])
+    if prev <= 0 or np.isnan(now) or np.isnan(prev):
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    nk_ret = now / prev - 1.0
+
+    if nk_ret > NK_THRESHOLD:
         direction = 1
-    elif z < -Z_ENTRY:
+    elif nk_ret < -NK_THRESHOLD:
         direction = -1
     else:
         direction = 0
