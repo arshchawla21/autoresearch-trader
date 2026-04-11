@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v20-v15-wide-tp
-==========================
-Hypothesis: v15 (v11 ∩ v4) had ~3.6% edge over the random baseline at
-TP=15/SL=10. Test whether that directionality extends to a wider target.
-Same signal, TP=20/SL=10 (2:1). Random win rate at 20/10 is ~33.3%; need
->35.8% for positive expectancy.
+train.py — v21-v11-any-crossasset
+=================================
+Hypothesis: v15 intersection had only 1.3 trades/day because requiring
+gold co-move is too specific. Keep v11's trend-pullback core but accept
+ANY of three cross-asset confirmations — gold co-move (v4), DXY anti-
+correlation (they should move together), Nikkei anti-correlation (risk-on
+usually couples with JPY weakening). OR-of-cross-asset should roughly 3×
+the trade count while preserving the quality filter.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TP_PIPS = 20.0
+TP_PIPS = 15.0
 SL_PIPS = 10.0
 
 Z_LB = 20
@@ -44,29 +46,57 @@ def _v11_signal(pair: pd.DataFrame) -> int:
     return 0
 
 
-def _v4_signal(pair: pd.DataFrame, gold: pd.DataFrame | None) -> int:
-    if gold is None or len(pair) < LB_SHORT + 1:
-        return 0
-    pc = pair["close"]
-    p_now = float(pc.iloc[-1])
-    p_prev = float(pc.iloc[-1 - LB_SHORT])
-    if p_prev <= 0:
-        return 0
-    gc = gold["close"]
+def _ret(s: pd.Series, ts_now, ts_prev) -> float:
     try:
-        g_now = float(gc.asof(pair.index[-1]))
-        g_prev = float(gc.asof(pair.index[-1 - LB_SHORT]))
+        a = float(s.asof(ts_now))
+        b = float(s.asof(ts_prev))
     except Exception:
-        return 0
-    if np.isnan(g_now) or np.isnan(g_prev) or g_prev <= 0:
-        return 0
-    jr = np.log(p_now / p_prev)
-    gr = np.log(g_now / g_prev)
-    if jr > MIN_MOVE and gr > MIN_MOVE:
-        return -1
-    if jr < -MIN_MOVE and gr < -MIN_MOVE:
-        return 1
-    return 0
+        return float("nan")
+    if np.isnan(a) or np.isnan(b) or b <= 0:
+        return float("nan")
+    return float(np.log(a / b))
+
+
+def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+    if len(pair) < LB_SHORT + 1:
+        return False
+    ts_now = pair.index[-1]
+    ts_prev = pair.index[-1 - LB_SHORT]
+    p_now = float(pair["close"].iloc[-1])
+    p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
+    if p_prev <= 0:
+        return False
+    jr = float(np.log(p_now / p_prev))
+
+    gold = prices.get("GC=F")
+    dxy = prices.get("DX-Y.NYB")
+    nk = prices.get("^N225")
+
+    gr = _ret(gold["close"], ts_now, ts_prev) if gold is not None else float("nan")
+    dr = _ret(dxy["close"], ts_now, ts_prev) if dxy is not None else float("nan")
+    nr = _ret(nk["close"], ts_now, ts_prev) if nk is not None else float("nan")
+
+    if want_long:
+        # Long ⇒ JPY should revert up. Confirmations:
+        #   (a) gold also fell (co-move anomaly)
+        #   (b) DXY rose while JPY fell (they should co-move)
+        #   (c) Nikkei rose while JPY fell (risk-on decoupling)
+        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
+            return True
+        return False
+    else:
+        # Short ⇒ JPY should revert down.
+        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+            return True
+        return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
@@ -74,9 +104,10 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     s11 = _v11_signal(pair)
-    s4 = _v4_signal(pair, prices.get("GC=F"))
-    if s11 == 0 or s4 == 0 or s11 != s4:
-        direction = 0
-    else:
+    if s11 == 0:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if _crossasset_confirms(pair, prices, want_long=(s11 == 1)):
         direction = s11
+    else:
+        direction = 0
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}

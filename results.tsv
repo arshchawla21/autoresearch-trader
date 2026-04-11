@@ -33,3 +33,4 @@ apr12b	gold_div_trend_gate	-4.0170	-0.038937	-2.6815	-0.7207	-0.054028	0.3983	0.
 apr12b	hour_seasonality	-5.9552	-0.213805	-9.0853	-0.9265	-0.230757	0.3945	0.8566	3919	Warmup hour-of-day bias - hour biases do not generalize warmup->eval	2026-04-12T16:40:00
 apr12b	wick_rejection	-5.3767	-0.105502	-5.2090	-0.9426	-0.111927	0.4480	0.8404	1790	Long wicks as reversal signal - 44.8% win at 12/10 brackets is actually at random baseline	2026-04-12T17:00:00
 apr12b	v15_wide_tp	-2.5308	0.003575	-1.2651	0.3169	-0.011283	0.3661	1.0283	295	v15 intersection with TP=20 SL=10 - edge extends to wider target (+0.36%), PF 1.03	2026-04-12T17:20:00
+apr12b	v11_any_crossasset	-2.0935	0.005009	-1.2391	0.3520	-0.014229	0.4383	1.0235	559	v11 + ANY of gold/DXY/Nikkei divergence - best yet, 43.8% win above breakeven 2.5 trades/day	2026-04-12T17:40:00
