@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v69-v61-tight-brackets
-=================================
-Hypothesis: v61 has positive return (+2.98%) but negative Sharpe
-(-0.90) — the per-bar MTM variance is high relative to trade PnL.
-Tighten the bracket floor (TP_MIN=6, SL_MIN=4) so low-vol trades
-resolve faster with less in-trade drawdown. Same structure, smaller
-containers.
+train.py — v70-v69-fast-atr
+===========================
+Hypothesis: v69 uses 20-bar ATR for both sizing and regime. Switch
+bracket sizing to a 10-bar ATR — more reactive to current conditions
+so each trade's bracket fits the vol at entry, not the 5-hour average.
+Regime filter stays on 20-bar ATR for stability.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ SL_BASE = 10.0
 TP_MIN, TP_MAX = 6.0, 20.0
 SL_MIN, SL_MAX = 4.0, 14.0
 ATR_LB = 20
+ATR_LB_FAST = 10
 ATR_MED_LB = 200
 ATR_SPIKE_LB = 500
 ATR_SPIKE_Q = 0.90
@@ -206,7 +206,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if pair is None:
         return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
 
-    atr = _atr_pips(pair, ATR_LB)
+    atr = _atr_pips(pair, ATR_LB_FAST)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
