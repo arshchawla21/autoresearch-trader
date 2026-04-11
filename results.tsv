@@ -13,3 +13,4 @@ apr12	histgbm_direction_ml	-5.9759	-0.013925	-8.7635	-0.6692	-0.020807	0.3578	0.
 apr12	session_filtered_mr	4.8632	0.011022	4.3618	2.9297	-0.003762	0.4933	1.4603	75	Z-score MR restricted to 00-13 UTC (Tokyo+early London)	2026-04-12T01:00:00
 apr12	stop_run_reversal	-1.8171	-0.000021	-1.8058	-0.0041	-0.005035	0.4079	1.0001	76	Fade failed breakouts of 12-bar high/low (wick reversal pattern)	2026-04-12T01:05:00
 apr12	triple_mr_ensemble	6.7454	0.016907	7.3712	4.4941	-0.003762	0.5000	1.4864	110	Majority vote of zscore + VIX-gated + session-gated MR (2-of-3)	2026-04-12T01:10:00
+apr12b	dxy_jpy_catchup	-5.9492	-0.115457	-5.8565	-0.9272	-0.124529	0.3956	0.8313	2093	Long JPY when DXY leads by 10bps/1h - catchup hypothesis wrong, 39.5% win	2026-04-12T10:00:00
