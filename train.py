@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v56-v47-cci-or
-=========================
-Hypothesis: v47 uses z/RSI/WR ORed as pullback trigger. Add CCI
-(Commodity Channel Index) extremes as a 4th OR trigger. CCI measures
-deviation from typical-price SMA in mean-absolute-deviation units and
-catches pullbacks missed by the gaussian oscillators.
+train.py — v57-v47-exhaustion
+=============================
+Hypothesis: v47 persistence requires pullback valid on 2 consecutive bars.
+But it doesn't require the pullback to be *ending*. Add exhaustion: the
+z-score on the current bar must be LESS extreme than on the prior bar
+(i.e., the pullback has bottomed and is starting to reverse). This should
+lift win rate by catching the turn rather than entering mid-dip.
 """
 
 from __future__ import annotations
@@ -28,13 +29,9 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-CCI_LB = 20
-CCI_LOW = -100.0
-CCI_HIGH = 100.0
 TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
-VOL_LB = 20
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -53,54 +50,38 @@ def _rsi(closes: np.ndarray, n: int) -> float:
     return float(100.0 - 100.0 / (1.0 + rs))
 
 
-def _williams_r(pair: pd.DataFrame, n: int) -> float:
-    if len(pair) < n:
-        return float("nan")
-    tail = pair.iloc[-n:]
-    hi = float(tail["high"].max())
-    lo = float(tail["low"].min())
-    c = float(tail["close"].iloc[-1])
-    if hi - lo <= 0:
-        return float("nan")
-    return -100.0 * (hi - c) / (hi - lo)
-
-
-def _cci_at(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, idx: int, n: int) -> float:
+def _z_at(closes: np.ndarray, idx: int, n: int) -> float:
     if idx == -1:
-        tp = (highs[-n:] + lows[-n:] + closes[-n:]) / 3.0
+        win = closes[-n:]
     else:
-        tp = (highs[idx - n + 1 : idx + 1] + lows[idx - n + 1 : idx + 1] + closes[idx - n + 1 : idx + 1]) / 3.0
-    if len(tp) < n:
+        win = closes[idx - n + 1 : idx + 1]
+    if len(win) < n:
         return float("nan")
-    mu = tp.mean()
-    md = np.abs(tp - mu).mean()
-    if md <= 0:
-        return float("nan")
-    return float((tp[-1] - mu) / (0.015 * md))
+    sd = float(win.std(ddof=1))
+    if sd <= 0:
+        return 0.0
+    return float((closes[idx] - float(win.mean())) / sd)
 
 
-def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
-    """Return (long_pullback, short_pullback, trend) at bar -offset (1 = current)."""
+def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float, float]:
+    """Return (long_pullback, short_pullback, trend, z) at bar -offset."""
     closes = pair["close"].values.astype(float)
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     idx = -offset
     if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
-        return False, False, 0.0
+        return False, False, 0.0, float("nan")
     last = float(closes[idx])
     prev = float(closes[idx - TREND_LB])
     if prev <= 0:
-        return False, False, 0.0
+        return False, False, 0.0, float("nan")
     trend = last / prev - 1.0
 
-    win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
-    sd = float(win.std(ddof=1))
-    zv = (last - float(win.mean())) / sd if sd > 0 else 0.0
+    zv = _z_at(closes, idx, Z_LB)
 
     rsi_slice = closes[: idx + 1] if idx != -1 else closes
     rsi_val = _rsi(rsi_slice, RSI_LB)
 
-    # williams %R over bars [idx-WR_LB+1, idx]
     if idx == -1:
         hi = float(highs[-WR_LB:].max())
         lo = float(lows[-WR_LB:].min())
@@ -111,47 +92,35 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    cci_val = _cci_at(highs, lows, closes, idx, CCI_LB)
-
     long_pullback = (
         (zv < -Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
         or (not np.isnan(wr_val) and wr_val < WR_LOW)
-        or (not np.isnan(cci_val) and cci_val < CCI_LOW)
     )
     short_pullback = (
         (zv > Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
         or (not np.isnan(wr_val) and wr_val > WR_HIGH)
-        or (not np.isnan(cci_val) and cci_val > CCI_HIGH)
     )
-    return long_pullback, short_pullback, trend
+    return long_pullback, short_pullback, trend, zv
 
 
 def _pullback_signal(pair: pd.DataFrame) -> int:
-    lp1, sp1, tr1 = _pullback_at(pair, 1)
-    lp2, sp2, _ = _pullback_at(pair, 2)
-    if tr1 > 0 and lp1 and lp2:
+    lp1, sp1, tr1, z1 = _pullback_at(pair, 1)
+    lp2, sp2, _, z2 = _pullback_at(pair, 2)
+    if np.isnan(z1) or np.isnan(z2):
+        return 0
+    # Exhaustion: current bar less extreme than prior bar (pullback reversing).
+    if tr1 > 0 and lp1 and lp2 and z1 > z2:
         return 1
-    if tr1 < 0 and sp1 and sp2:
+    if tr1 < 0 and sp1 and sp2 and z1 < z2:
         return -1
     return 0
 
 
-def _vol_ok(pair: pd.DataFrame) -> bool:
-    if "volume" not in pair.columns:
-        return True
-    v = pair["volume"].values.astype(float)
-    if len(v) < VOL_LB + 1:
-        return False
-    last = v[-1]
-    med = float(np.median(v[-VOL_LB:]))
-    return last > med
-
-
 def _atr_pips(pair: pd.DataFrame, n: int) -> float:
     if len(pair) < n + 1:
-        return TP_BASE  # fallback
+        return TP_BASE
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     closes = pair["close"].values.astype(float)
