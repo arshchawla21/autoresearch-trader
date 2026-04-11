@@ -26,3 +26,4 @@ apr12b	histgbm_longh	-7.3186	-0.274047	-11.4906	-0.9714	-0.282107	0.3862	0.8270	
 apr12b	trend_aligned_mr	-2.4518	-0.014904	-1.8602	-0.5288	-0.028183	0.4230	0.9616	941	Buy dips in 24h uptrend / sell rips in downtrend - 42.3% win rate best yet, nearly flat	2026-04-12T14:20:00
 apr12b	dxy_gated_dip	-4.1470	-0.064869	-3.5448	-0.9121	-0.071124	0.3983	0.8685	1200	DXY 24h gate instead of JPY self-trend - DXY uninformative, win drops to 40%	2026-04-12T14:40:00
 apr12b	strong_trend_dip	-4.0313	-0.018876	-2.0369	-0.7705	-0.024497	0.4048	0.8917	415	Require 24h trend>0.3% before MR dip entry - filter kills edge, weak trends had the alpha	2026-04-12T15:00:00
+apr12b	jpy_trend_follow	-5.4305	-0.203366	-8.5668	-0.9814	-0.207214	0.3995	0.8748	4273	Pure 24h JPY trend-follow no z-filter - random baseline 40%, trend alone has no edge	2026-04-12T15:20:00
