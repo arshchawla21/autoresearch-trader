@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v88-v80-tnx-or
-=========================
-Hypothesis: TNX regime as a hard gate cuts trades. Instead, add TNX
-as a 4th OR option in the cross-asset confirm (any-1-of-4). This
-ADDS qualifying trades without removing any, increasing activity
-while respecting the rate-differential signal.
+train.py — v89-v80-adaptive-ratio
+=================================
+Hypothesis: v80 uses fixed 1.5:1 TP:SL ratio. In high-vol regimes
+(Parkinson ratio > 1.0), tighter TP exits faster and reduces MTM
+exposure. Scale TP multiplier by inverse of vol ratio: TP = (1.5 /
+max(1, ratio)) × ATR. High vol → smaller TP, fast exits.
 """
 
 from __future__ import annotations
@@ -211,11 +211,20 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": 15.0, "sl_pips": 10.0}
 
     atr = _atr_pips(pair, ATR_LB)
-    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
+
+    # Vol-adaptive TP multiplier: high vol -> tighter TP, fast exits
+    park = _parkinson_series(pair, PARK_LB)
+    vol_ratio = 1.0
+    if len(park) >= PARK_MED_LB:
+        cur_p = float(park[-1])
+        med_p = float(np.median(park[-PARK_MED_LB:]))
+        if med_p > 0:
+            vol_ratio = cur_p / med_p
+    tp_mult = 1.5 / max(1.0, vol_ratio)
+    tp = max(TP_MIN, min(TP_MAX, tp_mult * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
     # Parkinson vol spike skip (replaces ATR-based skip in v69)
-    park = _parkinson_series(pair, PARK_LB)
     if len(park) >= PARK_SPIKE_LB:
         cur = float(park[-1])
         thresh = float(np.quantile(park[-PARK_SPIKE_LB:], PARK_SPIKE_Q))
