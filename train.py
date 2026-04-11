@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v89-v80-adaptive-ratio
-=================================
-Hypothesis: v80 uses fixed 1.5:1 TP:SL ratio. In high-vol regimes
-(Parkinson ratio > 1.0), tighter TP exits faster and reduces MTM
-exposure. Scale TP multiplier by inverse of vol ratio: TP = (1.5 /
-max(1, ratio)) × ATR. High vol → smaller TP, fast exits.
+train.py — v90-tokyo-session
+=============================
+Hypothesis: v80 champion averages outcomes across all 24h of forex
+activity. USD/JPY mean reversion is strongest during the Tokyo
+session (22–06 UTC) when liquidity is low and flow is dominated
+by JPY participants. Gate entries to that window only.
 """
 
 from __future__ import annotations
@@ -211,20 +211,17 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": 15.0, "sl_pips": 10.0}
 
     atr = _atr_pips(pair, ATR_LB)
-
-    # Vol-adaptive TP multiplier: high vol -> tighter TP, fast exits
-    park = _parkinson_series(pair, PARK_LB)
-    vol_ratio = 1.0
-    if len(park) >= PARK_MED_LB:
-        cur_p = float(park[-1])
-        med_p = float(np.median(park[-PARK_MED_LB:]))
-        if med_p > 0:
-            vol_ratio = cur_p / med_p
-    tp_mult = 1.5 / max(1.0, vol_ratio)
-    tp = max(TP_MIN, min(TP_MAX, tp_mult * atr))
+    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
+    # Tokyo session only: 22–06 UTC
+    ts = pair.index[-1]
+    hour = ts.hour
+    if not (hour >= 22 or hour < 6):
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
     # Parkinson vol spike skip (replaces ATR-based skip in v69)
+    park = _parkinson_series(pair, PARK_LB)
     if len(park) >= PARK_SPIKE_LB:
         cur = float(park[-1])
         thresh = float(np.quantile(park[-PARK_SPIKE_LB:], PARK_SPIKE_Q))

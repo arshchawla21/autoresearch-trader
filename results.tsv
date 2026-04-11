@@ -102,3 +102,4 @@ apr12b	v80_tnx_regime	-1.3366	0.027304	-0.5516	3.8869	-0.007025	0.5157	1.3080	25
 apr12b	v80_tnx_soft	-0.9582	0.030217	-0.4621	3.6919	-0.008185	0.4892	1.2285	370	v80 + TNX regime soft threshold 20bps - dilutes TNX signal still worse than v80	2026-04-13T12:35:00
 apr12b	v80_tnx_or	-0.6417	0.034538	-0.3330	3.7717	-0.009157	0.4891	1.2323	413	v80 + TNX as 4th OR in xasset confirm - adds 4 trades but drops win 49.14 to 48.91 TNX unique trades lower quality	2026-04-13T12:55:00
 apr12b	v89-adaptive-ratio	-0.8784	0.031089	-0.4395	3.3921	-0.009165	0.4964	1.2130	413	vol-inverse TP multiplier, slightly worse than v80	2026-04-12T00:00:00
+apr12b	v90-tokyo-session	-4.1276	0.005738	-1.2518	0.6851	-0.008376	0.4620	1.0975	171	Tokyo-only (22-06 UTC), MR dies at low liquidity	2026-04-12T00:00:00
