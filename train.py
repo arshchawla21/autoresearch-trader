@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v44-v36-atr-brackets
-===============================
-Hypothesis: v36 uses fixed 15/10 pips regardless of volatility regime.
-In quiet conditions 15 pips is a huge target; in volatile it is tiny
-noise. Scale TP/SL to 20-bar ATR: TP = 1.5*ATR, SL = 1.0*ATR. Same
-1.5:1 structure, but adapts to current realized vol. Bounded to
-[8, 25] pips for TP and [6, 18] pips for SL so we stay inside the
-programme's spec.
+train.py — v45-v44-dual-trend
+=============================
+Hypothesis: v44 champion uses a single 96-bar trend gate. Require BOTH
+48-bar (12h) AND 192-bar (48h) trends to agree with trade direction.
+HTF confluence ensures we are on the right side of two horizons, not
+just one, filtering regime-transition false signals.
 """
 
 from __future__ import annotations
@@ -31,6 +29,8 @@ WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
+TREND_LB_FAST = 48
+TREND_LB_SLOW = 192
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
@@ -66,13 +66,15 @@ def _williams_r(pair: pd.DataFrame, n: int) -> float:
 
 def _pullback_signal(pair: pd.DataFrame) -> int:
     closes = pair["close"].values.astype(float)
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + 1:
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB_SLOW) + 1:
         return 0
     last = float(closes[-1])
-    prev = float(closes[-1 - TREND_LB])
-    if prev <= 0:
+    prev_fast = float(closes[-1 - TREND_LB_FAST])
+    prev_slow = float(closes[-1 - TREND_LB_SLOW])
+    if prev_fast <= 0 or prev_slow <= 0:
         return 0
-    trend = last / prev - 1.0
+    trend_fast = last / prev_fast - 1.0
+    trend_slow = last / prev_slow - 1.0
 
     win = closes[-Z_LB:]
     sd = float(win.std(ddof=1))
@@ -90,9 +92,9 @@ def _pullback_signal(pair: pd.DataFrame) -> int:
         or (not np.isnan(rsi) and rsi > RSI_HIGH)
         or (not np.isnan(wr) and wr > WR_HIGH)
     )
-    if trend > 0 and long_pullback:
+    if trend_fast > 0 and trend_slow > 0 and long_pullback:
         return 1
-    if trend < 0 and short_pullback:
+    if trend_fast < 0 and trend_slow < 0 and short_pullback:
         return -1
     return 0
 
