@@ -1,19 +1,30 @@
-# program.md — Autonomous Trading Research Agent
+# program.md — Autonomous Forex Research Agent (USD/JPY, 15m)
 
 ## Mission
 
-You are an autonomous research agent. Your goal is to **discover novel, profitable intraday trading strategies** by iteratively modifying `train.py`. You are evaluated on a fixed backtesting harness (`prepare.py`) that you **cannot change**.
+You are an autonomous research agent hunting for **novel, profitable intraday USD/JPY strategies**. You do it by iteratively rewriting `train.py`, running a fixed 15-minute backtest, recording results, and pivoting on what you learn.
 
-You are not fine-tuning hyperparameters on a known approach. You are **inventing strategies**. Be radical. Try things that might fail spectacularly. The only constraint is the `trade()` API contract.
+You are **not** tuning hyperparameters on a known approach. You are **inventing strategies**. Be bold. The only contract you must honour is the `trade()` signature in train.py.
+
+---
+
+## Problem Shape
+
+- **One instrument**: USD/JPY (`JPY=X` on yfinance). No multi-asset allocation.
+- **One timeframe**: 15-minute bars. ~96 bars/day (forex is effectively 24h but yfinance has weekday gaps).
+- **One decision per bar when flat**: long, short, or flat. Nothing else.
+- **Fixed position size**. You never pick how big. The harness enters full notional and your PnL is a pure direction × price-change play.
+- **TP / SL exits**. Every trade closes because it hit take-profit or stop-loss (or the eval window ended). The strategy never closes a trade on a bar-close signal — once you enter, you commit to the TP/SL bracket.
+- **Lots of small trades is the point**. Spreads on USD/JPY are tiny (< 1 pip), so a strategy that produces 20+ trades/day with 55% win rate at 15/10 pip brackets is exactly the shape of alpha we want.
 
 ---
 
 ## Session Startup Protocol
 
-Every time you begin a new research session, follow these steps **in order**:
+Every new session:
 
 ### 1. Agree on a run tag
-Propose a tag based on today's date (e.g. `apr03`). The branch `autoresearch-trader/<tag>` must not already exist — this is a fresh run. If the date-based tag is taken, append a letter (e.g. `apr03b`).
+Propose a tag based on today's date (e.g. `apr12`). The branch `autoresearch-trader/<tag>` must not already exist — this is a fresh run. If the date-based tag is taken, append a letter (e.g. `apr12b`).
 
 ### 2. Create the branch
 ```bash
@@ -22,28 +33,27 @@ git checkout -b autoresearch-trader/<tag>
 from current `master` (or `main`).
 
 ### 3. Read the in-scope files
-The repo is small. Read these files for full context:
-- `README.md` — repository context (if it exists).
-- `prepare.py` — raw OHLCV data download + fixed backtesting evaluation. **Read-only. Never modify.**
-- `train.py` — the file you modify. **Everything lives here**: feature engineering, strategy logic, model architecture, training loop, or no training at all.
+The repo is small. Read these for context:
+- `prepare.py` — data download + fixed TP/SL backtest engine. **Read-only. Never modify.**
+- `train.py` — the file you modify. Everything lives here: features, rules, model, training loop, or no training at all.
 
 ### 4. Verify data exists
-Check that `~/.cache/autoresearch-trader/` contains `.parquet` files. If not, tell the human to run:
+Check that `~/.cache/autoresearch-trader/` contains `.parquet` files for `JPY=X` and the macro/commodity indicators. If the cache is stale or missing:
 ```bash
 uv run prepare.py --download
 ```
 
 ### 5. Initialize results.tsv
-If `results.tsv` does not exist, create it with this header row:
+If `results.tsv` does not exist in the branch, create it with this header row:
 
 ```
 run_tag	strategy_name	sharpe_ratio	total_return	sortino_ratio	calmar_ratio	max_drawdown	win_rate	profit_factor	n_trades	notes	timestamp
 ```
 
-The baseline random strategy will be the first entry after the initial run.
+The random baseline is always the first row.
 
 ### 6. Confirm and go
-Print a summary of what you see and confirm you're ready to begin experimenting.
+Summarise what you see and confirm you're ready to experiment.
 
 ---
 
@@ -52,217 +62,209 @@ Print a summary of what you see and confirm you're ready to begin experimenting.
 You modify **only** `train.py`. You must implement:
 
 ```python
-def trade(
-    prices: dict[str, pd.DataFrame],
-    current_idx: int,
-    symbols: list[str],
-) -> list[float]:
+def trade(prices: dict[str, pd.DataFrame]) -> dict:
 ```
 
-### Inputs
+### Input
 
-| Parameter | Type | Description |
+| Param | Type | Description |
 |---|---|---|
-| `prices` | `dict[str, pd.DataFrame]` | ALL historical OHLCV data from the dataset start up to the current 5-min candle. Keys include 15 tradeable symbols + 5 market indicators. |
-| `current_idx` | `int` | Index of the current candle in the aligned price matrix. |
-| `symbols` | `list[str]` | Ordered list of the 15 tradeable symbols. Your output must match this order. |
+| `prices` | `dict[str, pd.DataFrame]` | ALL historical OHLCV data from the dataset start up to and including the current 15m bar's close. Keys: `"JPY=X"` plus macro/commodity indicators. Each DataFrame has columns `open, high, low, close, volume` with a tz-aware DatetimeIndex. |
 
 ### Output
 
-A `list[float]` of length 15 (one weight per tradeable symbol).
+A dict with three keys:
 
-- **Positive** = long position, **Negative** = short position.
-- **Constraint**: `sum(|weights|) <= 1.0`. If you exceed this, the harness auto-rescales.
-- **Example**: `[0, 0.25, 0.5, 0, -0.25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]` → 25% long MSFT, 50% long NVDA, 25% short TSLA.
+```python
+{
+    "direction": 1,       # -1 short, 0 flat, 1 long
+    "tp_pips":   15.0,    # take-profit distance in pips
+    "sl_pips":   10.0,    # stop-loss distance in pips
+}
+```
+
+One pip on USD/JPY = **0.01** in price (so 15 pips = 0.15 yen, ~0.1% on a 150 handle). TP/SL are bracketed around the *entry price* (this bar's close). If you omit them, the harness defaults to `TP=15, SL=10`.
+
+### When it is called
+
+- Only when the bot is **flat**. If a position is open, the harness ignores `trade()` and walks intra-bar highs/lows against the TP/SL levels until one breaches. Ambiguous bars (both breached) resolve to **SL** (conservative).
+- `direction = 0` means stay flat. The harness will call you again on the next bar.
+- Entry price = this bar's close. TP/SL checks begin on the *next* bar.
 
 ### What you get for free
 
-At the first evaluation candle (day 31), you already have **~30 trading days** (~2,340 five-minute candles) of OHLCV data for every symbol. Use this for:
+At the first eval bar (day 31 ish), you already have **~30 days × ~96 bars/day ≈ 2,800 bars** of warmup data across the pair + all indicators. That is more than enough for:
 - Training ML models (fit on days 1–30, predict on day 31+)
-- Computing technical indicators that need lookback windows
+- Computing technical indicators with long lookbacks
 - Regime detection / clustering
-- Building covariance matrices
-- Literally anything
+- Volatility / carry modelling
+- Anything else you can think of
 
-### Tradeable universe (15 symbols)
+### Tradeable universe
 
-**Stocks**: AAPL, MSFT, NVDA, AMZN, TSLA, META, GOOGL, JPM, XOM, UNH
-**ETFs**: SPY, QQQ, IWM, XLF, XLE
+**Pair**: `JPY=X` (spot USD/JPY) — the only thing you can long/short.
 
-### Market indicators (read-only, cannot trade)
+### Context indicators (read-only, cannot trade)
 
-^VIX (volatility), ^TNX (10Y yield), GLD (gold), TLT (bonds), DX-Y.NYB (dollar index)
+| Symbol | What |
+|---|---|
+| `DX-Y.NYB` | US Dollar Index — direct USD leg of the pair |
+| `^TNX` | US 10Y Treasury yield — drives USD/JPY via yield differential |
+| `GC=F` | Gold futures — safe-haven / inverse-USD signal |
+| `CL=F` | WTI crude futures — inflation / risk proxy |
+| `^VIX` | CBOE Volatility Index — risk sentiment, JPY is the classic risk-off haven |
+| `^N225` | Nikkei 225 — Japan equity & BoJ policy proxy |
+| `TLT` | US 20Y+ treasury ETF — long-duration rate expectations |
+| `SPY` | S&P 500 ETF — global risk-on proxy |
+
+Not every indicator will have clean 15m data for every hour (VIX/indices sleep when US markets are closed; forex does not). Forward-fill or drop as you see fit.
 
 ---
 
 ## Evaluation
 
-Run the backtest:
 ```bash
 uv run prepare.py
 ```
 
-This prints and returns:
-- **Total Return** — cumulative P&L over the eval window
-- **Sharpe Ratio** — risk-adjusted return (annualized, 5% risk-free rate)
-- **Sortino Ratio** — like Sharpe but only penalizes downside volatility
+Prints and returns:
+
+- **Total Return** — compounded P&L over the eval window
+- **Sharpe Ratio** — annualised from per-bar mark-to-market returns (5% risk-free)
+- **Sortino Ratio** — downside-only volatility variant
 - **Calmar Ratio** — return / max drawdown
-- **Max Drawdown** — worst peak-to-trough decline
-- **Win Rate** — fraction of candles with positive return
-- **Profit Factor** — gross profits / gross losses
+- **Max Drawdown** — worst peak-to-trough on the equity curve
+- **Win Rate** — fraction of trades that closed on TP (per-trade, not per-bar)
+- **Profit Factor** — gross TP wins / gross SL losses
+- **# Trades** + **Trades/day** — activity level
 
-Your primary optimization target is **Sharpe ratio**, but pay attention to max drawdown and total return too.
-
----
-
-## Recording Results
-
-After every experiment, **append a row** to `results.tsv`:
-
-```
-apr03	momentum_cross	1.847	0.0312	2.105	3.42	-0.0091	0.523	1.34	1716	SMA 10/30 cross on NVDA+TSLA	2026-04-03T14:22:00
-```
-
-Fields (tab-separated):
-1. `run_tag` — the branch tag
-2. `strategy_name` — short descriptive name you invent
-3. `sharpe_ratio` — from backtest output
-4. `total_return` — from backtest output
-5. `sortino_ratio` — from backtest output
-6. `calmar_ratio` — from backtest output
-7. `max_drawdown` — from backtest output
-8. `win_rate` — from backtest output
-9. `profit_factor` — from backtest output
-10. `n_trades` — from backtest output
-11. `notes` — brief description of what you tried
-12. `timestamp` — ISO timestamp of when you ran it
-
-Then commit:
-```bash
-git add train.py results.tsv
-git commit -m "<strategy_name>: sharpe=<X>, return=<Y>"
-```
-
-This way we can `git log` to see the full history of experiments and `git diff` between any two to see exactly what changed.
+Primary optimisation target: **Sharpe ratio**. Secondary: trades/day and win rate (we want lots of activity and a genuine edge, not a single lucky trade).
 
 ---
 
-## Strategy Ideas — Go Wild
+## Workflow For Every Experiment
 
-The whole point is to explore broadly. Here are categories to consider, but **do not limit yourself to these**:
+For each experiment, tag it incrementally (`v1-baseline`, `v2-...`, `v3-...`) and follow:
 
-### Technical / Algorithmic
-- Moving average crossovers (SMA, EMA, DEMA, TEMA)
-- Bollinger Band mean reversion
-- RSI / MACD / Stochastic oscillator signals
-- VWAP deviation strategies
-- Order flow imbalance (volume analysis)
-- Pairs trading / statistical arbitrage between correlated assets
-- Breakout detection (Donchian channels, ATR-based)
+1. **Hypothesis** — before touching train.py, write a one-line hypothesis: "I think X will work because Y."
+2. **Edit `train.py`** — only this file.
+3. **Run** — `uv run prepare.py`. Capture metrics.
+4. **Record** — append a row to `results.tsv`.
+5. **Commit** —
+   ```bash
+   git add train.py results.tsv
+   git commit -m "<tag>: <description> | sharpe=<value>"
+   ```
+6. **Reflect** — re-read `results.tsv`. What does the trend say? What is the most surprising result? What have you *not* tried yet? Decide the next pivot.
 
-### Statistical / Quantitative
-- Kalman filter for trend estimation
-- Hidden Markov Models for regime detection
-- PCA on returns → trade principal components
-- Cointegration-based pairs (Engle-Granger, Johansen)
-- GARCH volatility forecasting → vol-targeting
-- Copula-based dependency modeling
-- Bayesian online changepoint detection
+### Recording format (tab-separated)
 
-### Machine Learning
-- Gradient-boosted trees (XGBoost/LightGBM) on engineered features
-- LSTM / GRU on raw price sequences
-- Transformer-based sequence models
-- Reinforcement learning (Q-learning, policy gradient on the weight space)
-- Autoencoders for anomaly detection → contrarian signals
-- Random forests on microstructure features
-- Online learning (no batch training — update every candle)
+```
+apr12	vix_fade	1.84	0.0312	2.10	3.42	-0.0091	0.53	1.34	316	Fade VIX spikes on USD/JPY shorts	2026-04-12T14:22:00
+```
 
-### Cross-Asset / Macro
-- VIX regime switching (risk-on / risk-off allocation)
-- Dollar index as a leading indicator for equities
-- Yield curve slope → sector rotation
-- Gold/bond flight-to-safety signals
-- Correlation breakdown detection → crisis alpha
-
-### Exotic / Creative
-- Entropy-based position sizing
-- Fractal dimension of recent price paths
-- Genetic programming to evolve trading rules
-- Attention-weighted ensemble of multiple sub-strategies
-- Adversarial strategy: detect and fade momentum chasers
-- Information-theoretic features (transfer entropy between assets)
-- Topological data analysis on price manifolds
-
-### Meta-Strategies
-- Ensemble: run 5 different strategies, vote on weights
-- Adaptive: measure recent Sharpe of sub-strategies, reallocate
-- Anti-overfit: train on odd days, validate on even, only deploy if both work
-- Kelly criterion position sizing on top of any signal
+Fields: `run_tag, strategy_name, sharpe_ratio, total_return, sortino_ratio, calmar_ratio, max_drawdown, win_rate, profit_factor, n_trades, notes, timestamp`.
 
 ---
 
 ## Rules of Engagement
 
 1. **Only edit `train.py`**. Never touch `prepare.py`.
-2. **Record every experiment** in `results.tsv` and commit to git.
-3. **Be novel**. If your last 3 experiments were all moving-average variants, pivot to something completely different.
-4. **Fail fast**. If an idea gives a Sharpe < 0.5 after the first run, don't tweak it — try a different approach entirely.
-5. **Iterate in 15-minute bursts**. Implement → run → record → reflect → pivot or refine.
-6. **Use the indicators**. VIX, treasury yields, dollar index, gold, and bonds are there for a reason. Cross-asset signals are underexplored.
-7. **Watch for overfitting**. You're backtesting on 22 trading days of 5-min data. If your Sharpe is above 5.0, you're probably overfitting. Be suspicious.
-8. **Speed matters somewhat**. The backtest calls `trade()` ~1,700 times. If a single call takes >100ms, the total runtime becomes painful. Cache aggressively.
-9. **Think about why**. Before implementing, write a 1-sentence hypothesis: "I believe X because Y." After running, check if the results support the hypothesis.
+2. **Record every experiment** in `results.tsv` and commit to git. No run is lost.
+3. **Be novel.** If your last 3 experiments were all moving-average variants, pivot to something completely different.
+4. **Fail fast.** If an idea gives Sharpe < 0.5 on its first run, don't tweak hyperparameters — invent a new idea.
+5. **Prefer structure over tuning.** The user explicitly does not want overfitting from hyperparameter search. Changes should be *mechanistic*: a new signal, a new feature, a new regime filter, a new model — not a tweak to a lookback window.
+6. **Use the indicators.** Cross-asset context (DXY, ^TNX, gold, VIX) is usually where the uncorrelated edge lives. If you ignore them for 3+ experiments, you are leaving alpha on the table.
+7. **Tight, triggering TP/SL.** The user wants stops and targets that actually hit — don't set TP = 100 pips at 15m. Keep bracket widths in the 5–30 pip range, with TP:SL somewhere between 1:1 and 2:1. Never rely on bar-close exits.
+8. **Direction only.** You may vary TP/SL per run but the model's only job at inference time is long/short/flat. No position sizing, no magnitude prediction.
+9. **Lots of trades is good.** Aim for 10+ trades/day. A strategy with Sharpe 3 but 2 trades/month is not what we are building.
+10. **Watch for overfitting.** Only ~30 days of eval data. Sharpe > 5 is a red flag, not a trophy. Prefer robust structural signals that would plausibly work on a different month.
+11. **Speed matters.** `trade()` is called ~2,800 times per run. If a single call takes > 50ms your feedback loop dies. Cache any fitted model in a module-level global.
+12. **Write your *why*.** Before implementing, commit-message the hypothesis. After running, check whether the result supports it. That's how you learn.
 
 ---
 
-## Example Workflow
+## The Pitch Mechanism
 
-```
-Human: Let's start a new research session.
+After every **~10–15 experiments**, take a breath and write a short reflection to the user. If — and only if — you have genuine evidence that a current limitation is capping performance, you may **pitch** changes to `prepare.py` / data / timeframes. Pitches should be specific, evidence-backed, and framed as:
 
-Agent:
-1. Tag: apr03 — checking branch doesn't exist... ✓
-2. Creating branch: git checkout -b autoresearch-trader/apr03
-3. Reading prepare.py, train.py...
-4. Data check: ~/.cache/autoresearch-trader/ has 20 parquet files ✓
-5. Creating results.tsv with header row ✓
+> "I have tried A, B, C on USD/JPY 15m and they all cap out around Sharpe X because of reason Y. I believe adding Z would unlock a new class of strategies, specifically by enabling idea W. Can I add Z?"
 
-Ready. Let me start with the random baseline to establish a floor.
+Valid pitch topics (non-exhaustive):
+- **More data**: additional indicators (e.g. BoJ-meeting calendar, CFTC positioning, DXY order-flow proxy, JPY basis swaps).
+- **Different timeframe**: e.g. 5m for microstructure plays, or 1h for cleaner regime work.
+- **Additional FX pair**: only if the strategy clearly benefits from a correlated / co-integrated second leg (EUR/JPY, GBP/JPY, USD/CHF cross-hedge, etc.).
+- **Live news / sentiment data**: e.g. a headline feed, economic surprise index, FOMC transcript delta.
+- **Transaction costs**: pitch *in* if you think zero-cost is producing unrealistic churn strategies.
 
-[runs uv run prepare.py, records results]
+**Do not** pitch for:
+- "Let me predict magnitude too." The user has been explicit: direction only, fixed size.
+- "Remove the TP/SL." The bracket-exit structure is non-negotiable.
+- "Let me trade more pairs in parallel." One pair at a time.
 
-Baseline: Sharpe=-0.02, Return=-0.1%. As expected for random.
+If the user approves a pitch, they will update `prepare.py` themselves. Do not pre-emptively edit it.
 
-Hypothesis: "VIX regime switching should work because high-VIX
-environments favor defensive positioning (long XLE/UNH, short TSLA/NVDA)
-while low-VIX favors risk-on (long NVDA/TSLA/QQQ)."
+---
 
-[implements VIX regime strategy in train.py]
-[runs backtest]
-[records to results.tsv]
-[git add + commit]
+## Strategy Ideas — Go Wild
 
-Result: Sharpe=0.82, Return=+1.2%. Promising. But let me try
-something completely different next...
+Categories to consider. **Don't limit yourself to these.**
 
-Hypothesis: "PCA on rolling returns can extract latent factors.
-Trading the first principal component's momentum should capture
-broad market moves while reducing noise."
+### Technical / Classic
+- EMA / DEMA / TEMA crossovers on 15m
+- Bollinger band mean reversion (with regime gate)
+- RSI / Stoch RSI / Williams %R extremes
+- VWAP deviation
+- Donchian breakouts with ATR-based bracket
+- Opening range breakout (Tokyo / London / NY sessions)
 
-[implements PCA strategy]
-...
-```
+### Statistical / Quant
+- Kalman filter for trend estimation
+- HMM regime detection (trending vs ranging → opposite rule)
+- ARIMA / GARCH for vol-aware direction calls
+- Online Bayesian changepoint detection
+- Granger-causality: does DXY lead USD/JPY intraday?
+- Cointegration-based mean reversion using DXY as anchor
+- Factor model: PC1 of (DXY, ^TNX, GC=F, ^VIX) → regression on next-bar return
+
+### Machine Learning
+- XGBoost / LightGBM on engineered features, fit on warmup, predict on eval
+- Logistic regression for P(up next bar | features) → threshold into direction
+- LSTM / GRU on windowed returns + indicator diffs
+- Attention model over multi-indicator history
+- RL: Q-learning / policy gradient over {long, flat, short} × TP bucket
+- Online learning: update the model every N bars
+
+### Cross-Asset / Macro
+- DXY momentum → USD/JPY momentum (classic carry)
+- ^TNX > MA + ^VIX < threshold → long bias
+- Gold / DXY divergence as a reversal signal
+- Nikkei-lagged signal (Tokyo session effect)
+- VIX regime gate: only trade when vol regime is X
+
+### Exotic / Creative
+- Entropy / fractal dimension of recent price path
+- Genetic evolution of rule sets
+- Topological features (persistent homology on price windows)
+- Meta-ensemble that measures rolling Sharpe of sub-strategies and allocates
+- Anti-overfit: train on odd days, validate on even, only deploy if both work
+- Adversarial: detect and fade stop-run patterns around round numbers
+
+### Meta-Strategies
+- Ensemble: 3 independent signals vote on direction (2/3 required to trade)
+- Regime-adaptive: different strategy per VIX bucket
+- Time-of-day gating: only trade specific sessions
+- Kelly-ish dynamic TP/SL based on recent volatility (while keeping size fixed)
 
 ---
 
 ## Final Notes
 
-- The harness uses `np.random.default_rng()` without a fixed seed in the baseline, so the random strategy's results will vary slightly between runs. That's fine — it's a baseline.
-- All data is 5-minute candles. There are roughly 78 candles per trading day (6.5 hours × 12 candles/hour).
-- The evaluation window is approximately days 31–60, giving ~22 trading days and ~1,700 eval candles.
-- The risk-free rate is set to 5% annual for Sharpe calculation.
-- Transaction costs are NOT modeled. This is intentional — focus on signal quality first, worry about friction later.
-- If you want to do in-strategy training (e.g., fit an ML model on the warmup period), do it **once** on the first call to `trade()` and cache the model in a global variable. Don't retrain every candle unless you have a specific reason.
+- USD/JPY pip = 0.01. TP=15 means price needs to move 0.15 in your favour.
+- The eval window is ~30 trading days of 15m forex bars. Use it carefully.
+- Transaction costs are **not** modelled. Real USD/JPY spreads are ~0.5–1 pip at a retail broker. A strategy with positive edge at 15/10 pip brackets will still have positive edge after cost, but be aware.
+- Warmup = first 30 days. Eval = days 31+. Data before eval is free to use.
+- Forex data has weekend gaps. Expect NaNs across the Sun → Mon boundary.
+- If you fit an ML model, cache it in a module-level global and only refit when warranted — `trade()` is called ~2,800 times per run.
 
 Good luck. Find alpha.

@@ -1,96 +1,53 @@
 #!/usr/bin/env python3
 """
-train.py — Strategy Implementation
-====================================
+train.py — Strategy Implementation (USD/JPY 15m forex)
+========================================================
 THIS IS THE ONLY FILE THE AI AGENT MODIFIES.
 
-Strategy 10: Optimized VIX Regime Momentum
-
-The original VIX regime strategy achieved Sharpe 3.44.
-This optimized version:
-- Uses VIX level to select momentum vs mean-reversion
-- Takes top 3 / bottom 3 performers based on 5-bar returns
-- Adds modest yield curve signal (^TNX trend)
+Strategy v1: Random Baseline
+----------------------------
+At every 15m bar, if flat, flip a 25% biased coin:
+  - 75% stay flat
+  - 12.5% go long
+  - 12.5% go short
+With TP = 15 pips, SL = 10 pips on USD/JPY. That produces ~1 entry attempt
+per hour on average (4 bars × 25% = 1 trade/hr expectation while flat).
+This is the random floor every real strategy must beat.
 """
 
 from __future__ import annotations
 
-import numpy as np
+import random
+
 import pandas as pd
 
 
-def trade(
-    prices: dict[str, pd.DataFrame],
-    current_idx: int,
-    symbols: list[str],
-) -> list[float]:
+# Baseline TP / SL — every strategy in this project uses fixed-size trades
+# and only decides direction. TP/SL levels may be tuned across experiments.
+TP_PIPS = 15.0
+SL_PIPS = 10.0
+
+# Fixed RNG so the random baseline is reproducible across runs.
+_RNG = random.Random(42)
+
+
+def trade(prices: dict[str, pd.DataFrame]) -> dict:
     """
-    Optimized VIX regime-based momentum/mean-reversion strategy.
+    Called on every 15m bar when the bot is flat.
 
-    Core logic:
-    - VIX > 20: Mean-reversion regime (fade strong moves)
-    - VIX <= 20: Momentum regime (follow trends)
-    - Long/short top/bottom 3 performers based on 5-bar returns
+    Returns a dict:
+        {"direction": -1 | 0 | 1, "tp_pips": float, "sl_pips": float}
+
+    direction  1 → open long USD/JPY at this bar's close
+    direction -1 → open short USD/JPY at this bar's close
+    direction  0 → stay flat
     """
-    # Get current VIX level
-    vix_sym = "^VIX"
-    if vix_sym not in prices or len(prices[vix_sym]) < 5:
-        return [0.0] * len(symbols)
-
-    vix_df = prices[vix_sym]
-    current_vix = float(vix_df["close"].iloc[-1])
-
-    # VIX regime
-    VIX_THRESHOLD = 20.0
-    high_vol_regime = current_vix > VIX_THRESHOLD
-
-    # Optional: Check 10Y yield trend for additional context
-    tnx_sym = "^TNX"
-    tnx_trend = 0.0
-    if tnx_sym in prices and len(prices[tnx_sym]) >= 5:
-        tnx_values = prices[tnx_sym]["close"].values
-        if tnx_values[-5] > 0:
-            tnx_trend = (tnx_values[-1] - tnx_values[-5]) / tnx_values[-5]
-
-    # Compute 5-bar returns for all tradeable symbols
-    returns = {}
-    for sym in symbols:
-        if sym not in prices or len(prices[sym]) < 6:
-            returns[sym] = 0.0
-            continue
-        df = prices[sym]
-        recent_close = float(df["close"].iloc[-1])
-        past_close = float(df["close"].iloc[-6])
-        if past_close > 0:
-            ret = (recent_close - past_close) / past_close
-        else:
-            ret = 0.0
-        returns[sym] = ret
-
-    # Sort by returns
-    sorted_syms = sorted(returns.keys(), key=lambda s: returns[s])
-
-    # Initialize weights
-    weights = {sym: 0.0 for sym in symbols}
-
-    # Select positions based on regime
-    if high_vol_regime:
-        # Mean-reversion: long worst, short best
-        for sym in sorted_syms[:3]:
-            weights[sym] = 1.0 / 6.0
-        for sym in sorted_syms[-3:]:
-            weights[sym] = -1.0 / 6.0
+    r = _RNG.random()
+    if r < 0.125:
+        direction = 1
+    elif r < 0.25:
+        direction = -1
     else:
-        # Momentum: long best, short worst
-        for sym in sorted_syms[-3:]:
-            weights[sym] = 1.0 / 6.0
-        for sym in sorted_syms[:3]:
-            weights[sym] = -1.0 / 6.0
+        direction = 0
 
-    # Yield curve adjustment: if yields rising rapidly, reduce exposure
-    exposure_scale = 1.0
-    if tnx_trend > 0.02:  # >2% move in yields
-        exposure_scale = 0.8
-
-    # Return weights in order
-    return [weights[sym] * exposure_scale for sym in symbols]
+    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
