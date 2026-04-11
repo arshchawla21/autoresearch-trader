@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v67-v61-multi-trend
-==============================
-Hypothesis: v61 uses a single 96-bar (1 day) trend gate. Replace with
-3-tier multi-timeframe trend: require majority (2-of-3) of {24-bar,
-96-bar, 288-bar} trends to agree in sign. Captures strategies where
-short-term mean reversion happens within an agreed medium+long trend.
+train.py — v68-v61-spy-xasset
+=============================
+Hypothesis: v61 uses gold/DXY/Nikkei for xasset confirm. Swap gold out
+for SPY (S&P 500) — SPY is the purest risk-on/risk-off proxy, and
+USD/JPY pullbacks tend to reverse on risk-on flows. SPY's 4-bar move
+should be more directionally informative than gold's.
 """
 
 from __future__ import annotations
@@ -33,9 +33,7 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-TREND_LB_S = 24
 TREND_LB = 96
-TREND_LB_L = 288
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
@@ -97,28 +95,13 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     idx = -offset
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB_L) + offset + 1:
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
         return False, False, 0.0
     last = float(closes[idx])
-    # 3-tier trend vote: short/medium/long lookbacks
-    lbs = (TREND_LB_S, TREND_LB, TREND_LB_L)
-    votes = 0
-    for lb in lbs:
-        base = float(closes[idx - lb])
-        if base <= 0:
-            return False, False, 0.0
-        r = last / base - 1.0
-        if r > 0:
-            votes += 1
-        elif r < 0:
-            votes -= 1
-    # trend signal: +1 if majority positive, -1 if majority negative, 0 otherwise
-    if votes >= 1:
-        trend = 1.0
-    elif votes <= -1:
-        trend = -1.0
-    else:
-        trend = 0.0
+    prev = float(closes[idx - TREND_LB])
+    if prev <= 0:
+        return False, False, 0.0
+    trend = last / prev - 1.0
 
     win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
     sd = float(win.std(ddof=1))
@@ -173,7 +156,6 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
 
 
 def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
-    mm = MIN_MOVE
     if len(pair) < LB_SHORT + 1:
         return False
     ts_now = pair.index[-1]
@@ -196,24 +178,25 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
             return float("nan")
         return float(np.log(a / b))
 
-    gr = _r(prices.get("GC=F"))
+    sr = _r(prices.get("SPY"))
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
 
     if want_long:
-        if not np.isnan(gr) and jr < -mm and gr < -mm:
+        # USD/JPY down + SPY up = risk-on reversal -> long
+        if not np.isnan(sr) and jr < -MIN_MOVE and sr > MIN_MOVE:
             return True
-        if not np.isnan(dr) and jr < -mm and dr > mm:
+        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
             return True
-        if not np.isnan(nr) and jr < -mm and nr > mm:
+        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
             return True
         return False
     else:
-        if not np.isnan(gr) and jr > mm and gr > mm:
+        if not np.isnan(sr) and jr > MIN_MOVE and sr < -MIN_MOVE:
             return True
-        if not np.isnan(dr) and jr > mm and dr < -mm:
+        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
             return True
-        if not np.isnan(nr) and jr > mm and nr < -mm:
+        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
             return True
         return False
 
