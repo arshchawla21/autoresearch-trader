@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v60-v59-linreg-trend
-===============================
-Hypothesis: v59 uses endpoint ratio (close_now/close_96_ago - 1) as
-trend — noisy at the endpoints. Replace with the slope of an OLS
-linear regression of log-close over the 96-bar window. Same sign when
-the trend is strong but less flicker at the end of the window.
+train.py — v61-v59-vol-spike-skip
+=================================
+Hypothesis: v59 takes every qualifying pullback regardless of regime.
+Vol spikes (top decile of recent ATR distribution) are where mean
+reversion fails and trends/breakouts rule. Skip trades when current
+ATR is in the top 10% of 500-bar ATR distribution — preserves normal
+and dead-regime trades but removes turbulent ones.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ TP_MIN, TP_MAX = 8.0, 25.0
 SL_MIN, SL_MAX = 6.0, 18.0
 ATR_LB = 20
 ATR_MED_LB = 200
+ATR_SPIKE_LB = 500
+ATR_SPIKE_Q = 0.90
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -97,20 +100,10 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
     if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
         return False, False, 0.0
     last = float(closes[idx])
-    # Linreg slope of log-close over TREND_LB bars
-    if idx == -1:
-        trend_win = closes[-TREND_LB:]
-    else:
-        trend_win = closes[idx - TREND_LB + 1 : idx + 1]
-    if len(trend_win) < TREND_LB or (trend_win <= 0).any():
+    prev = float(closes[idx - TREND_LB])
+    if prev <= 0:
         return False, False, 0.0
-    y = np.log(trend_win)
-    x = np.arange(TREND_LB, dtype=float)
-    x_mean = x.mean()
-    y_mean = y.mean()
-    num = float(((x - x_mean) * (y - y_mean)).sum())
-    den = float(((x - x_mean) ** 2).sum())
-    trend = num / den if den > 0 else 0.0
+    trend = last / prev - 1.0
 
     win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
     sd = float(win.std(ddof=1))
@@ -217,6 +210,14 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     atr = _atr_pips(pair, ATR_LB)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
+
+    # Vol spike skip: if current ATR is in top decile of recent history, stand aside
+    atr_hist = _atr_series(pair, ATR_LB)
+    if len(atr_hist) >= ATR_SPIKE_LB:
+        cur_atr = float(atr_hist[-1])
+        thresh = float(np.quantile(atr_hist[-ATR_SPIKE_LB:], ATR_SPIKE_Q))
+        if cur_atr > thresh:
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     z_entry = _adaptive_z(pair)
     s = _pullback_signal(pair, z_entry)
