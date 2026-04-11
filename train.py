@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v95-pin-bar
-=======================
-Hypothesis: v92 swing confirm works because it detects rejection.
-Cleaner signal: pin-bar shape. For long, last bar's lower wick
-> 50% of range (sellers rejected). For short, upper wick > 50%.
-Replaces swing HL/LH with a bar-shape filter alongside 2-bar
-pullback + xasset AND stack.
+train.py — v96-swing-1to1
+==========================
+Hypothesis: v92 (swing AND xasset) has genuine quality lift
+(51.5% win, PF 1.40, Calmar 4.05) but Sharpe is killed by long
+MTM holds. Tighten TP:SL to 1:1 — faster trade resolution with
+a 51%+ win rate still yields positive expectancy post-spread.
 """
 
 from __future__ import annotations
@@ -212,7 +211,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": 15.0, "sl_pips": 10.0}
 
     atr = _atr_pips(pair, ATR_LB)
-    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
+    tp = max(TP_MIN, min(TP_MAX, 1.0 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
     # Parkinson vol spike skip (replaces ATR-based skip in v69)
@@ -228,20 +227,16 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    # Pin-bar confirm: long needs lower wick > 50% of range, short upper wick
-    o = float(pair["open"].iloc[-1])
-    c = float(pair["close"].iloc[-1])
-    h = float(pair["high"].iloc[-1])
-    l = float(pair["low"].iloc[-1])
-    rng = h - l
-    if rng <= 0:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    lower_wick = min(o, c) - l
-    upper_wick = h - max(o, c)
-    if s == 1 and lower_wick / rng < 0.5:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if s == -1 and upper_wick / rng < 0.5:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    # Swing-reversal AND xasset-confirm
+    if len(pair) >= 2:
+        low1 = float(pair["low"].iloc[-1])
+        low2 = float(pair["low"].iloc[-2])
+        hi1 = float(pair["high"].iloc[-1])
+        hi2 = float(pair["high"].iloc[-2])
+        if s == 1 and not (low1 > low2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+        if s == -1 and not (hi1 < hi2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
