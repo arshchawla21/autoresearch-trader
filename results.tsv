@@ -17,3 +17,4 @@ apr12b	dxy_jpy_catchup	-5.9492	-0.115457	-5.8565	-0.9272	-0.124529	0.3956	0.8313
 apr12b	logit_xasset	-7.7952	-0.198784	-9.5154	-0.9975	-0.199280	0.3856	0.7987	3133	Logistic on 9 cross-asset features - warmup regime mismatch, bets continuation and loses	2026-04-12T10:30:00
 apr12b	bbands_adx_mr	-4.6154	-0.013607	-1.8751	-0.4445	-0.030609	0.4646	0.8977	353	Bollinger 2-sigma MR gated by ADX<22 - too few trades (1.6/day), no edge	2026-04-12T11:00:00
 apr12b	gold_jpy_divergence	-6.0334	-0.108356	-5.1936	-0.9227	-0.117431	0.4921	0.8252	1835	Fade JPY when gold moves same direction - symmetric 10/10 brackets killed by spread	2026-04-12T11:30:00
+apr12b	shock_fade	-4.6955	-0.061862	-3.2793	-0.9521	-0.064974	0.3898	0.8364	903	Fade 2-bar >2sigma shocks - wrong direction, shocks continue. Flip this.	2026-04-12T12:00:00

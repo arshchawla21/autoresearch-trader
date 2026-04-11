@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v4-gold-jpy-divergence
-=================================
-Hypothesis: USD/JPY and gold (XAU/USD) are structurally inversely correlated
-(USD strength drives JPY up / gold down). When they move in the *same*
-direction intraday, it's an anomaly that tends to resolve by USD/JPY
-reverting. Fade USD/JPY's current direction when gold confirms divergence.
+train.py — v5-shock-fade
+========================
+Hypothesis: sharp 30-minute (2-bar) price shocks in USD/JPY tend to
+over-extend and reverse. Measure the 2-bar log return as a z-score
+against its recent 60-bar stdev; when the shock exceeds 2σ, fade it.
+Asymmetric 15/10 brackets so spread doesn't eat the edge.
 """
 
 from __future__ import annotations
@@ -13,45 +13,35 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TP_PIPS = 10.0
+TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-LB = 4                 # 1h lookback
-MIN_JPY_MOVE = 0.0005  # 5bps
-MIN_GOLD_MOVE = 0.0005
+SHOCK_LB = 2          # 30-minute shock window
+VOL_LB = 60           # ~15h rolling stdev
+Z_ENTRY = 2.0
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    gold = prices.get("GC=F")
-    if pair is None or gold is None or len(pair) < LB + 1:
+    if pair is None or len(pair) < VOL_LB + SHOCK_LB + 2:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    p_now = float(pair["close"].iloc[-1])
-    p_prev = float(pair["close"].iloc[-1 - LB])
-    if p_prev <= 0:
+    closes = pair["close"].values[-(VOL_LB + SHOCK_LB + 5):].astype(float)
+    # 2-bar log returns
+    ret2 = np.log(closes[SHOCK_LB:] / closes[:-SHOCK_LB])
+    if len(ret2) < VOL_LB:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    idx_now = pair.index[-1]
-    idx_prev = pair.index[-1 - LB]
-    gc = gold["close"]
-    try:
-        g_now = float(gc.asof(idx_now))
-        g_prev = float(gc.asof(idx_prev))
-    except Exception:
+    recent = ret2[-VOL_LB:]
+    sd = float(recent.std(ddof=1))
+    if sd <= 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if np.isnan(g_now) or np.isnan(g_prev) or g_prev <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    last = float(ret2[-1])
+    z = last / sd
 
-    jpy_ret = np.log(p_now / p_prev)
-    gld_ret = np.log(g_now / g_prev)
-
-    # Anomaly: both moved same direction with meaningful magnitude.
-    if jpy_ret > MIN_JPY_MOVE and gld_ret > MIN_GOLD_MOVE:
-        direction = -1          # fade JPY up
-    elif jpy_ret < -MIN_JPY_MOVE and gld_ret < -MIN_GOLD_MOVE:
-        direction = 1           # fade JPY down
+    if z > Z_ENTRY:
+        direction = -1
+    elif z < -Z_ENTRY:
+        direction = 1
     else:
         direction = 0
-
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
