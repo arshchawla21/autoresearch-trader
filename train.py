@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v72-v69-reverse
-==========================
-Hypothesis: v69 wins 48.81% on mean reversion — genuine edge but
-Sharpe still negative. Diagnostic: reverse the direction. If the
-same signal scores >51% when flipped (trend continuation), the
-pullback is actually a break-of-extreme continuation signal, not a
-reversion. If it scores lower, MR is confirmed.
+train.py — v73-v69-1to1
+=======================
+Hypothesis: v72 confirmed MR edge is real (reversed = 32.3%). v69's
+negative Sharpe comes from in-trade MTM vol (1.5:1 TP/SL spreads
+trades over longer bars). Switch to 1:1 brackets (TP_MULT=1.0,
+SL_MULT=1.0) — shorter trades, less MTM exposure. Edge-over-random
+requirement goes from 40% to 50%, but our 48.81% MR may still hold
+enough to profit.
 """
 
 from __future__ import annotations
@@ -208,7 +209,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
 
     atr = _atr_pips(pair, ATR_LB)
-    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
+    tp = max(TP_MIN, min(TP_MAX, 1.0 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
     # Vol spike skip: stand aside in top decile of 500-bar ATR distribution
@@ -224,7 +225,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = -s  # v72: reverse signal test
+        direction = s
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}

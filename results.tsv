@@ -85,3 +85,4 @@ apr12b	v61_tight_brackets	-0.6968	0.033442	-0.3606	3.4871	-0.009590	0.4881	1.220
 apr12b	v69_fast_atr	-0.7828	0.031592	-0.4149	3.0436	-0.010380	0.4866	1.2041	409	v69 + 10-bar ATR for brackets - adds variance hurts marginally	2026-04-13T08:10:00
 apr12b	v69_tp_cap15	-1.2459	0.026009	-0.6346	3.0806	-0.008443	0.4801	1.1833	427	v69 + cap TP_MAX=15 SL_MAX=10 - smaller wins drag down avg PnL worse than v69	2026-04-13T08:25:00
 apr12b	v69_reversed	-7.3495	-0.063181	-3.5580	-0.9803	-0.064447	0.3229	0.6323	384	v69 signal reversed as diagnostic - 32.3pct confirms MR edge is real not random	2026-04-13T08:40:00
+apr12b	v69_1to1	-2.4842	0.011055	-1.0522	0.9496	-0.011642	0.5616	1.0831	438	v69 + 1:1 TP:SL - win 56.16pct MR edge is strong but 0.8p spread eats small wins PF 1.08	2026-04-13T08:55:00
