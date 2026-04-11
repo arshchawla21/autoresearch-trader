@@ -37,3 +37,4 @@ apr12b	v11_any_crossasset	-2.0935	0.005009	-1.2391	0.3520	-0.014229	0.4383	1.023
 apr12b	v21_plus_tnx	-2.4803	-0.004366	-1.5245	-0.2468	-0.017686	0.4286	0.9834	623	Add TNX as 4th cross-asset confirm - TNX is noise, drops win from 43.8 to 42.9	2026-04-12T18:00:00
 apr12b	rsi_or_zscore	-1.9720	0.006936	-1.1806	0.4419	-0.015698	0.4404	1.0317	570	RSI<32 OR z<-1.2 as pullback triggers - new champion 44.04% win +0.69% return	2026-04-12T18:20:00
 apr12b	v23_plus_williams	-1.8343	0.007180	-1.1778	0.3686	-0.019478	0.4396	1.0290	646	Add Williams %R pullback detector - marginal lift on trade count, quality holds	2026-04-12T18:40:00
+apr12b	trend_xasset_only	-3.4402	-0.049486	-3.0291	-0.7305	-0.067739	0.4078	0.9042	1263	Drop pullback oscillator - wins/trades 2x but quality 40.78% breaks edge. Pullback essential.	2026-04-12T19:00:00
