@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v40-squeeze-fade
-===========================
-Hypothesis: v39 showed squeeze-breakouts hit only 36.94% — below the
-TP=15/SL=10 random baseline. That means the breakouts reliably FAIL:
-price breaks the 20-bar range during vol compression, then snaps back.
-Fade the break instead — go opposite direction.
+train.py — v41-v36-wick-confirm
+===============================
+Hypothesis: v36 champion (vol-filtered v24) is the best so far at
++1.13%/44.81% win. The pullback oscillators look at closes only. A
+rejection wick on the entry bar (price pierced lower but closed near
+high) is a real-time confirmation that the dip was bought. Require a
+lower wick ≥ 40% of bar range for longs and upper wick ≥ 40% for shorts.
+Novel structural filter from intrabar shape, additive to v36.
 """
 
 from __future__ import annotations
@@ -16,74 +18,166 @@ import pandas as pd
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-BB_LB = 20
-BB_MED_LB = 100
-BRK_LB = 20
+Z_LB = 20
+Z_ENTRY = 1.2
+RSI_LB = 14
+RSI_LOW = 32.0
+RSI_HIGH = 68.0
+WR_LB = 14
+WR_LOW = -85.0
+WR_HIGH = -15.0
+TREND_LB = 96
+LB_SHORT = 4
+MIN_MOVE = 0.0005
+VOL_LB = 20
+WICK_FRAC = 0.40
 
 
-def _bb_width(closes: np.ndarray, n: int) -> float:
-    if len(closes) < n:
+def _rsi(closes: np.ndarray, n: int) -> float:
+    if len(closes) < n + 1:
         return float("nan")
-    w = closes[-n:]
-    sd = float(w.std(ddof=1))
-    mu = float(w.mean())
-    if mu <= 0:
+    diffs = np.diff(closes[-(n + 1):])
+    ups = np.maximum(diffs, 0.0)
+    downs = np.maximum(-diffs, 0.0)
+    avg_up = ups.mean()
+    avg_down = downs.mean()
+    if avg_down <= 0 and avg_up <= 0:
+        return 50.0
+    if avg_down <= 0:
+        return 100.0
+    rs = avg_up / avg_down
+    return float(100.0 - 100.0 / (1.0 + rs))
+
+
+def _williams_r(pair: pd.DataFrame, n: int) -> float:
+    if len(pair) < n:
         return float("nan")
-    return (4.0 * sd) / mu  # ~2 sigma full width normalized
+    tail = pair.iloc[-n:]
+    hi = float(tail["high"].max())
+    lo = float(tail["low"].min())
+    c = float(tail["close"].iloc[-1])
+    if hi - lo <= 0:
+        return float("nan")
+    return -100.0 * (hi - c) / (hi - lo)
 
 
-def _bb_width_series(closes: np.ndarray, n: int, out_len: int) -> np.ndarray:
-    arr = np.full(out_len, np.nan)
-    for i in range(n - 1, len(closes)):
-        w = closes[i - n + 1 : i + 1]
-        sd = w.std(ddof=1)
-        mu = w.mean()
-        if mu > 0:
-            arr[i - (len(closes) - out_len)] = (4.0 * sd) / mu
-    return arr
+def _pullback_signal(pair: pd.DataFrame) -> int:
+    closes = pair["close"].values.astype(float)
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + 1:
+        return 0
+    last = float(closes[-1])
+    prev = float(closes[-1 - TREND_LB])
+    if prev <= 0:
+        return 0
+    trend = last / prev - 1.0
+
+    win = closes[-Z_LB:]
+    sd = float(win.std(ddof=1))
+    z = (last - float(win.mean())) / sd if sd > 0 else 0.0
+    rsi = _rsi(closes, RSI_LB)
+    wr = _williams_r(pair, WR_LB)
+
+    long_pullback = (
+        (z < -Z_ENTRY)
+        or (not np.isnan(rsi) and rsi < RSI_LOW)
+        or (not np.isnan(wr) and wr < WR_LOW)
+    )
+    short_pullback = (
+        (z > Z_ENTRY)
+        or (not np.isnan(rsi) and rsi > RSI_HIGH)
+        or (not np.isnan(wr) and wr > WR_HIGH)
+    )
+    if trend > 0 and long_pullback:
+        return 1
+    if trend < 0 and short_pullback:
+        return -1
+    return 0
+
+
+def _vol_ok(pair: pd.DataFrame) -> bool:
+    if "volume" not in pair.columns:
+        return True
+    v = pair["volume"].values.astype(float)
+    if len(v) < VOL_LB + 1:
+        return False
+    last = v[-1]
+    med = float(np.median(v[-VOL_LB:]))
+    return last > med
+
+
+def _wick_ok(pair: pd.DataFrame, direction: int) -> bool:
+    row = pair.iloc[-1]
+    o = float(row["open"]); h = float(row["high"]); l = float(row["low"]); c = float(row["close"])
+    rng = h - l
+    if rng <= 0:
+        return False
+    lower_wick = min(o, c) - l
+    upper_wick = h - max(o, c)
+    if direction == 1:
+        return lower_wick / rng >= WICK_FRAC
+    if direction == -1:
+        return upper_wick / rng >= WICK_FRAC
+    return False
+
+
+def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+    if len(pair) < LB_SHORT + 1:
+        return False
+    ts_now = pair.index[-1]
+    ts_prev = pair.index[-1 - LB_SHORT]
+    p_now = float(pair["close"].iloc[-1])
+    p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
+    if p_prev <= 0:
+        return False
+    jr = float(np.log(p_now / p_prev))
+
+    def _r(other):
+        if other is None:
+            return float("nan")
+        try:
+            a = float(other["close"].asof(ts_now))
+            b = float(other["close"].asof(ts_prev))
+        except Exception:
+            return float("nan")
+        if np.isnan(a) or np.isnan(b) or b <= 0:
+            return float("nan")
+        return float(np.log(a / b))
+
+    gr = _r(prices.get("GC=F"))
+    dr = _r(prices.get("DX-Y.NYB"))
+    nr = _r(prices.get("^N225"))
+
+    if want_long:
+        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
+            return True
+        return False
+    else:
+        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
+            return True
+        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
+            return True
+        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+            return True
+        return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    closes = pair["close"].values.astype(float)
-    highs = pair["high"].values.astype(float)
-    lows = pair["low"].values.astype(float)
-    n = len(closes)
-    need = BB_LB + BB_MED_LB + 5
-    if n < need:
+    s = _pullback_signal(pair)
+    if s == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    # current BB width and its 100-bar median
-    widths = np.full(BB_MED_LB, np.nan)
-    for k in range(BB_MED_LB):
-        end = n - k
-        start = end - BB_LB
-        if start < 0:
-            continue
-        w = closes[start:end]
-        sd = w.std(ddof=1)
-        mu = w.mean()
-        if mu > 0:
-            widths[k] = (4.0 * sd) / mu
-    widths = widths[~np.isnan(widths)]
-    if len(widths) < 20:
+    if not _vol_ok(pair):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    cur = widths[0]
-    med = float(np.median(widths))
-    in_squeeze = cur < med
-
-    if not in_squeeze:
+    if not _wick_ok(pair, s):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    # break of 20-bar high/low by last close (excluding current bar from the range)
-    prior_hi = float(highs[-BRK_LB - 1 : -1].max())
-    prior_lo = float(lows[-BRK_LB - 1 : -1].min())
-    last = float(closes[-1])
-
-    if last > prior_hi:
-        return {"direction": -1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if last < prior_lo:
-        return {"direction": 1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+        direction = s
+    else:
+        direction = 0
+    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
