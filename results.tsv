@@ -44,3 +44,4 @@ apr12b	coint_spread_mr	-5.9673	-0.130546	-5.8828	-0.9450	-0.138143	0.4439	0.8264
 apr12b	coint_spread_momo	-4.6251	-0.092244	-4.5905	-0.9045	-0.101979	0.4575	0.8760	2035	Ride JPY-DXY spread breakout - still below 49.1% breakeven no directional edge either way	2026-04-12T20:00:00
 apr12b	macd_divergence	-4.8406	-0.001199	-1.5842	-0.0985	-0.012172	0.4258	0.9816	155	MACD histogram divergence + trend gate - 42.6% win at random baseline 0.7 trades/day	2026-04-12T20:20:00
 apr12b	meta_labeling_logit	-4.1494	-0.001387	-1.3796	-0.1162	-0.011940	0.4271	0.9829	192	v24 + logit meta-filter trained on warmup - filter kills 70% of trades and drops quality	2026-04-12T20:40:00
+apr12b	v24_london_only	-2.8320	0.006091	-1.1227	0.4356	-0.013983	0.4456	1.0555	285	v24 restricted to 07-16 UTC London - win up 0.6pp trade count halved slightly worse return	2026-04-12T21:00:00
