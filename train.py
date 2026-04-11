@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v97-v14-replay
-==========================
-Hypothesis: Historic v14 (triple-signal MR vote) achieved Sharpe 6.75
-on legacy yfinance data. Replay its exact structure on OANDA: z>1.5
-fade, VIX<60pct gate, 0-12 UTC session gate, 2-of-3 vote. Fixed
-15/10 TP/SL. Clean-slate reset from v80 champion family.
+train.py — v98-v14-momentum
+============================
+Hypothesis: v97 (historic MR replay) got 39.45% win rate — BELOW
+random (40% at 1.5:1). That's not noise — it's a regime signal.
+USD/JPY 15m z-score extremes now CONTINUE, not revert. Flip the
+direction: z>+1.5 → LONG, z<-1.5 → SHORT. Same 2-of-3 vote.
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ def _zscore_signal(pair: pd.DataFrame) -> int:
         return 0
     z = (float(closes.iloc[-1]) - mu) / sd
     if z > Z_ENTRY:
-        return -1
-    if z < -Z_ENTRY:
         return 1
+    if z < -Z_ENTRY:
+        return -1
     return 0
 
 
