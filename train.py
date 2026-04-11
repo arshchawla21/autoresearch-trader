@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v45-v44-dual-trend
+train.py — v46-v44-persistent
 =============================
-Hypothesis: v44 champion uses a single 96-bar trend gate. Require BOTH
-48-bar (12h) AND 192-bar (48h) trends to agree with trade direction.
-HTF confluence ensures we are on the right side of two horizons, not
-just one, filtering regime-transition false signals.
+Hypothesis: v44 fires on single-bar pullback triggers that may be
+fleeting intrabar spikes. Require the pullback oscillator to be valid
+on BOTH the current bar AND the prior bar. Persistent condition should
+filter noisy one-bar false signals.
 """
 
 from __future__ import annotations
@@ -29,8 +29,6 @@ WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
-TREND_LB_FAST = 48
-TREND_LB_SLOW = 192
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
@@ -64,37 +62,57 @@ def _williams_r(pair: pd.DataFrame, n: int) -> float:
     return -100.0 * (hi - c) / (hi - lo)
 
 
-def _pullback_signal(pair: pd.DataFrame) -> int:
+def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
+    """Return (long_pullback, short_pullback, trend) at bar -offset (1 = current)."""
     closes = pair["close"].values.astype(float)
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB_SLOW) + 1:
-        return 0
-    last = float(closes[-1])
-    prev_fast = float(closes[-1 - TREND_LB_FAST])
-    prev_slow = float(closes[-1 - TREND_LB_SLOW])
-    if prev_fast <= 0 or prev_slow <= 0:
-        return 0
-    trend_fast = last / prev_fast - 1.0
-    trend_slow = last / prev_slow - 1.0
+    highs = pair["high"].values.astype(float)
+    lows = pair["low"].values.astype(float)
+    idx = -offset
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
+        return False, False, 0.0
+    last = float(closes[idx])
+    prev = float(closes[idx - TREND_LB])
+    if prev <= 0:
+        return False, False, 0.0
+    trend = last / prev - 1.0
 
-    win = closes[-Z_LB:]
+    win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
     sd = float(win.std(ddof=1))
-    z = (last - float(win.mean())) / sd if sd > 0 else 0.0
-    rsi = _rsi(closes, RSI_LB)
-    wr = _williams_r(pair, WR_LB)
+    zv = (last - float(win.mean())) / sd if sd > 0 else 0.0
+
+    rsi_slice = closes[: idx + 1] if idx != -1 else closes
+    rsi_val = _rsi(rsi_slice, RSI_LB)
+
+    # williams %R over bars [idx-WR_LB+1, idx]
+    if idx == -1:
+        hi = float(highs[-WR_LB:].max())
+        lo = float(lows[-WR_LB:].min())
+        c = float(closes[-1])
+    else:
+        hi = float(highs[idx - WR_LB + 1 : idx + 1].max())
+        lo = float(lows[idx - WR_LB + 1 : idx + 1].min())
+        c = float(closes[idx])
+    wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
     long_pullback = (
-        (z < -Z_ENTRY)
-        or (not np.isnan(rsi) and rsi < RSI_LOW)
-        or (not np.isnan(wr) and wr < WR_LOW)
+        (zv < -Z_ENTRY)
+        or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
+        or (not np.isnan(wr_val) and wr_val < WR_LOW)
     )
     short_pullback = (
-        (z > Z_ENTRY)
-        or (not np.isnan(rsi) and rsi > RSI_HIGH)
-        or (not np.isnan(wr) and wr > WR_HIGH)
+        (zv > Z_ENTRY)
+        or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
+        or (not np.isnan(wr_val) and wr_val > WR_HIGH)
     )
-    if trend_fast > 0 and trend_slow > 0 and long_pullback:
+    return long_pullback, short_pullback, trend
+
+
+def _pullback_signal(pair: pd.DataFrame) -> int:
+    lp1, sp1, tr1 = _pullback_at(pair, 1)
+    lp2, sp2, _ = _pullback_at(pair, 2)
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if trend_fast < 0 and trend_slow < 0 and short_pullback:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
