@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v76-v69-dual-z
+train.py — v77-london-orb
 =========================
-Hypothesis: v69 uses a single 20-bar z-score in the OR oscillator
-family. Add a 40-bar z-score AND-gate: the pullback must be extreme
-on BOTH 20-bar (recent) AND 40-bar (medium) windows. Multi-timeframe
-pullback confirmation should remove one-off fast moves and select
-for genuine reversions.
+Hypothesis: Opening range breakout is a completely different signal
+family from v69's pullback MR. The London session open (~07:00 UTC)
+has the sharpest directional flow in FX. Compute the range of the
+first 4 bars (7:00-8:00 UTC), then on bars 5-20 of the London session,
+enter long on a close above the range high, short on a close below
+the range low. Bracket with ATR-scaled TP=1.5×ATR, SL=1.0×ATR.
 """
 
 from __future__ import annotations
@@ -15,225 +16,80 @@ import numpy as np
 import pandas as pd
 
 PIP = 0.01
-TP_BASE = 15.0
-SL_BASE = 10.0
-TP_MIN, TP_MAX = 6.0, 20.0
-SL_MIN, SL_MAX = 4.0, 14.0
+TP_MIN, TP_MAX = 8.0, 25.0
+SL_MIN, SL_MAX = 6.0, 18.0
 ATR_LB = 20
-ATR_LB_FAST = 10
-ATR_MED_LB = 200
-ATR_SPIKE_LB = 500
-ATR_SPIKE_Q = 0.90
 
-Z_LB = 20
-Z_LB_LONG = 40
-Z_ENTRY_BASE = 1.2
-Z_ENTRY_MIN = 0.9
-Z_ENTRY_MAX = 1.8
-Z_LONG_ENTRY = 0.8
-RSI_LB = 14
-RSI_LOW = 32.0
-RSI_HIGH = 68.0
-WR_LB = 14
-WR_LOW = -85.0
-WR_HIGH = -15.0
-TREND_LB = 96
-LB_SHORT = 4
-MIN_MOVE = 0.0005
+# London session: UTC 07:00 to 15:00. First 4 bars (07:00-08:00) form range.
+LONDON_OPEN_HOUR = 7
+LONDON_RANGE_BARS = 4
+LONDON_TRADE_END = 12  # stop taking new entries after 12:00 UTC
 
 
-def _rsi(closes: np.ndarray, n: int) -> float:
-    if len(closes) < n + 1:
-        return float("nan")
-    diffs = np.diff(closes[-(n + 1):])
-    ups = np.maximum(diffs, 0.0)
-    downs = np.maximum(-diffs, 0.0)
-    avg_up = ups.mean()
-    avg_down = downs.mean()
-    if avg_down <= 0 and avg_up <= 0:
-        return 50.0
-    if avg_down <= 0:
-        return 100.0
-    rs = avg_up / avg_down
-    return float(100.0 - 100.0 / (1.0 + rs))
-
-
-def _true_range(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> np.ndarray:
-    return np.maximum(
+def _atr_pips(pair: pd.DataFrame, n: int) -> float:
+    if len(pair) < n + 1:
+        return 15.0
+    highs = pair["high"].values.astype(float)
+    lows = pair["low"].values.astype(float)
+    closes = pair["close"].values.astype(float)
+    tr = np.maximum(
         highs[1:] - lows[1:],
         np.maximum(
             np.abs(highs[1:] - closes[:-1]),
             np.abs(lows[1:] - closes[:-1]),
         ),
     )
-
-
-def _atr_series(pair: pd.DataFrame, n: int) -> np.ndarray:
-    highs = pair["high"].values.astype(float)
-    lows = pair["low"].values.astype(float)
-    closes = pair["close"].values.astype(float)
-    tr = _true_range(highs, lows, closes)
     if len(tr) < n:
-        return np.array([])
-    # rolling mean
-    csum = np.cumsum(np.insert(tr, 0, 0.0))
-    atr = (csum[n:] - csum[:-n]) / n
-    return atr
-
-
-def _adaptive_z(pair: pd.DataFrame) -> float:
-    atr_ser = _atr_series(pair, ATR_LB)
-    if len(atr_ser) < ATR_MED_LB:
-        return Z_ENTRY_BASE
-    cur = float(atr_ser[-1])
-    med = float(np.median(atr_ser[-ATR_MED_LB:]))
-    if med <= 0:
-        return Z_ENTRY_BASE
-    ratio = cur / med
-    z = Z_ENTRY_BASE * ratio
-    return max(Z_ENTRY_MIN, min(Z_ENTRY_MAX, z))
-
-
-def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool, bool, float]:
-    closes = pair["close"].values.astype(float)
-    highs = pair["high"].values.astype(float)
-    lows = pair["low"].values.astype(float)
-    idx = -offset
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
-        return False, False, 0.0
-    last = float(closes[idx])
-    prev = float(closes[idx - TREND_LB])
-    if prev <= 0:
-        return False, False, 0.0
-    trend = last / prev - 1.0
-
-    win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
-    sd = float(win.std(ddof=1))
-    zv = (last - float(win.mean())) / sd if sd > 0 else 0.0
-
-    win_l = closes[idx - Z_LB_LONG + 1 : idx + 1] if idx != -1 else closes[-Z_LB_LONG:]
-    sd_l = float(win_l.std(ddof=1))
-    zv_l = (last - float(win_l.mean())) / sd_l if sd_l > 0 else 0.0
-
-    rsi_slice = closes[: idx + 1] if idx != -1 else closes
-    rsi_val = _rsi(rsi_slice, RSI_LB)
-
-    if idx == -1:
-        hi = float(highs[-WR_LB:].max())
-        lo = float(lows[-WR_LB:].min())
-        c = float(closes[-1])
-    else:
-        hi = float(highs[idx - WR_LB + 1 : idx + 1].max())
-        lo = float(lows[idx - WR_LB + 1 : idx + 1].min())
-        c = float(closes[idx])
-    wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
-
-    osc_long = (
-        (zv < -z_entry)
-        or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
-        or (not np.isnan(wr_val) and wr_val < WR_LOW)
-    )
-    osc_short = (
-        (zv > z_entry)
-        or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
-        or (not np.isnan(wr_val) and wr_val > WR_HIGH)
-    )
-    # Dual-Z AND gate: require long-window z also on the same side.
-    long_pullback = osc_long and zv_l < -Z_LONG_ENTRY
-    short_pullback = osc_short and zv_l > Z_LONG_ENTRY
-    return long_pullback, short_pullback, trend
-
-
-def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
-    lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
-    lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    if tr1 > 0 and lp1 and lp2:
-        return 1
-    if tr1 < 0 and sp1 and sp2:
-        return -1
-    return 0
-
-
-def _atr_pips(pair: pd.DataFrame, n: int) -> float:
-    if len(pair) < n + 1:
-        return TP_BASE
-    highs = pair["high"].values.astype(float)
-    lows = pair["low"].values.astype(float)
-    closes = pair["close"].values.astype(float)
-    tr = _true_range(highs, lows, closes)
-    if len(tr) < n:
-        return TP_BASE
+        return 15.0
     return float(tr[-n:].mean()) / PIP
 
 
-def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
-    if len(pair) < LB_SHORT + 1:
-        return False
+def _session_range(pair: pd.DataFrame) -> tuple[float, float] | None:
+    """Return (high, low) of today's London opening range (bars 07:00-08:00 UTC)."""
+    if len(pair) < LONDON_RANGE_BARS:
+        return None
     ts_now = pair.index[-1]
-    ts_prev = pair.index[-1 - LB_SHORT]
-    p_now = float(pair["close"].iloc[-1])
-    p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
-    if p_prev <= 0:
-        return False
-    jr = float(np.log(p_now / p_prev))
-
-    def _r(other):
-        if other is None:
-            return float("nan")
-        try:
-            a = float(other["close"].asof(ts_now))
-            b = float(other["close"].asof(ts_prev))
-        except Exception:
-            return float("nan")
-        if np.isnan(a) or np.isnan(b) or b <= 0:
-            return float("nan")
-        return float(np.log(a / b))
-
-    gr = _r(prices.get("GC=F"))
-    dr = _r(prices.get("DX-Y.NYB"))
-    nr = _r(prices.get("^N225"))
-
-    if want_long:
-        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
-            return True
-        return False
-    else:
-        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            return True
-        return False
+    if ts_now.tzinfo is None:
+        return None
+    day_start = ts_now.normalize()
+    # Opening range starts at LONDON_OPEN_HOUR UTC
+    range_start = day_start + pd.Timedelta(hours=LONDON_OPEN_HOUR)
+    range_end = range_start + pd.Timedelta(hours=1)  # 4 x 15min = 1h
+    window = pair[(pair.index >= range_start) & (pair.index < range_end)]
+    if len(window) < LONDON_RANGE_BARS:
+        return None
+    return float(window["high"].max()), float(window["low"].min())
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
-        return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
+        return {"direction": 0, "tp_pips": 15.0, "sl_pips": 10.0}
 
     atr = _atr_pips(pair, ATR_LB)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    # Vol spike skip: stand aside in top decile of 500-bar ATR distribution
-    atr_hist = _atr_series(pair, ATR_LB)
-    if len(atr_hist) >= ATR_SPIKE_LB:
-        cur_atr = float(atr_hist[-1])
-        thresh = float(np.quantile(atr_hist[-ATR_SPIKE_LB:], ATR_SPIKE_Q))
-        if cur_atr > thresh:
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
-    z_entry = _adaptive_z(pair)
-    s = _pullback_signal(pair, z_entry)
-    if s == 0:
+    ts = pair.index[-1]
+    if ts.tzinfo is None:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = s
+    hour_utc = ts.hour
+    # Only trade during london post-range window (08:00 - 12:00 UTC)
+    if hour_utc < LONDON_OPEN_HOUR + 1 or hour_utc >= LONDON_TRADE_END:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
+    rng = _session_range(pair)
+    if rng is None:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    hi, lo = rng
+
+    c = float(pair["close"].iloc[-1])
+    # Need a real breakout margin at least 2 pips past the range
+    margin = 2.0 * PIP
+    if c > hi + margin:
+        direction = 1
+    elif c < lo - margin:
+        direction = -1
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
