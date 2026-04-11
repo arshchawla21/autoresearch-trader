@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v23-rsi-or-zscore
-============================
-Hypothesis: v21's pullback signal is z_20 < -1.2. Adding RSI-14 as an
-OR'd pullback detector (long if RSI < 32, short if > 68) should fire
-on price dips that are *shaped* differently from a z-score extreme —
-e.g. a slow grind down is detected by RSI but not by a 20-bar z. Still
-require 24h trend alignment and any one cross-asset confirmation.
+train.py — v24-add-williams
+===========================
+Hypothesis: v23 OR-stack of RSI+z-score lifted us to 44.04% win and
++0.69% return. Add a third OR'd pullback detector, Williams %R (-14),
+which is high/low based and will catch range-edge rejections that RSI
+and z-score miss. Same trend gate + cross-asset confirmation.
 """
 
 from __future__ import annotations
@@ -22,6 +21,9 @@ Z_ENTRY = 1.2
 RSI_LB = 14
 RSI_LOW = 32.0
 RSI_HIGH = 68.0
+WR_LB = 14
+WR_LOW = -85.0
+WR_HIGH = -15.0
 TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
@@ -43,28 +45,46 @@ def _rsi(closes: np.ndarray, n: int) -> float:
     return float(100.0 - 100.0 / (1.0 + rs))
 
 
+def _williams_r(pair: pd.DataFrame, n: int) -> float:
+    if len(pair) < n:
+        return float("nan")
+    tail = pair.iloc[-n:]
+    hi = float(tail["high"].max())
+    lo = float(tail["low"].min())
+    c = float(tail["close"].iloc[-1])
+    if hi - lo <= 0:
+        return float("nan")
+    return -100.0 * (hi - c) / (hi - lo)
+
+
 def _pullback_signal(pair: pd.DataFrame) -> int:
-    if len(pair) < max(Z_LB, RSI_LB + 1, TREND_LB) + 1:
+    if len(pair) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + 1:
         return 0
     closes = pair["close"].values.astype(float)
     last = float(closes[-1])
 
-    # trend
     prev = float(closes[-1 - TREND_LB])
     if prev <= 0:
         return 0
     trend = last / prev - 1.0
 
-    # z-score
     win = closes[-Z_LB:]
     sd = float(win.std(ddof=1))
     z = (last - float(win.mean())) / sd if sd > 0 else 0.0
 
-    # RSI
     rsi = _rsi(closes, RSI_LB)
+    wr = _williams_r(pair, WR_LB)
 
-    long_pullback = (z < -Z_ENTRY) or (not np.isnan(rsi) and rsi < RSI_LOW)
-    short_pullback = (z > Z_ENTRY) or (not np.isnan(rsi) and rsi > RSI_HIGH)
+    long_pullback = (
+        (z < -Z_ENTRY)
+        or (not np.isnan(rsi) and rsi < RSI_LOW)
+        or (not np.isnan(wr) and wr < WR_LOW)
+    )
+    short_pullback = (
+        (z > Z_ENTRY)
+        or (not np.isnan(rsi) and rsi > RSI_HIGH)
+        or (not np.isnan(wr) and wr > WR_HIGH)
+    )
 
     if trend > 0 and long_pullback:
         return 1
