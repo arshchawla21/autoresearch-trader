@@ -72,3 +72,4 @@ apr12b	v47_cci_or	-1.2703	0.020835	-0.6995	1.3991	-0.014892	0.4654	1.1099	477	v4
 apr12b	v47_exhaustion	-2.1217	0.015507	-0.8663	1.3269	-0.011687	0.4735	1.1486	264	v47 + z current less extreme than prior bar - exhaustion win 47.35 but halves trade count	2026-04-13T04:40:00
 apr12b	v47_mom_align	-2.5264	0.005620	-1.1237	0.3659	-0.015359	0.4495	1.0439	307	v47 + 8-bar return opposing trend by 8bps - explicit magnitude constraint drops quality 44.95pct	2026-04-13T04:55:00
 apr12b	v47_adaptive_z	-0.9923	0.027206	-0.5187	2.4158	-0.011262	0.4782	1.1625	435	NEW CHAMPION v47 + Z scaled by ATR ratio to 200-bar median - Sharpe -0.99 return +2.72pct win 47.82	2026-04-13T05:10:00
+apr12b	v59_linreg_trend	-1.3833	0.015826	-0.8340	0.9536	-0.016596	0.4558	1.0665	599	v59 + OLS slope trend 96-bar - more trades 599 but quality drops to 45.58pct endpoint ratio better	2026-04-13T05:25:00
