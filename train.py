@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v85-v80-spike85
-==========================
-Hypothesis: v80 skips top-decile Parkinson vol. Stricter: skip top
-15% (keep 85% of bars). Removes more of the tail but also more of
-the "moderate" spike bars. Test if the win rate improves further.
+train.py — v86-v80-tnx-regime
+=============================
+Hypothesis: US 10Y futures (^TNX / USB10Y) drive USD/JPY via yield
+differential. Use TNX 24h trend as a regime gate: allow LONG JPY
+pullbacks only when TNX is falling (rates rising, USD strong); allow
+SHORT pullbacks only when TNX is rising. This adds a macro tailwind
+filter on top of the 96-bar price trend.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ ATR_LB = 20
 PARK_LB = 20
 PARK_MED_LB = 200
 PARK_SPIKE_LB = 500
-PARK_SPIKE_Q = 0.85
+PARK_SPIKE_Q = 0.90
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -219,6 +221,25 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
+    # TNX (US 10Y futures) 24h trend regime filter.
+    # TNX falling (futures) = yields rising = USD stronger -> favor LONG USDJPY.
+    tnx = prices.get("^TNX")
+    if tnx is not None and len(tnx) >= 97:
+        ts_now = pair.index[-1]
+        try:
+            t_now = float(tnx["close"].asof(ts_now))
+            t_prev = float(tnx["close"].asof(ts_now - pd.Timedelta(hours=24)))
+        except Exception:
+            t_now = t_prev = float("nan")
+        if not np.isnan(t_now) and not np.isnan(t_prev) and t_prev > 0:
+            tnx_trend = t_now / t_prev - 1.0
+            # Long pullback only when TNX is falling (rates up); short only when TNX rising.
+            if s == 1 and tnx_trend > 0:
+                return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+            if s == -1 and tnx_trend < 0:
+                return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
