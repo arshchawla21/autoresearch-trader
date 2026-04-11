@@ -21,3 +21,4 @@ apr12b	shock_fade	-4.6955	-0.061862	-3.2793	-0.9521	-0.064974	0.3898	0.8364	903	
 apr12b	shock_ride	-5.5830	-0.080727	-4.0251	-0.9390	-0.085970	0.3715	0.7802	864	Ride 2-bar shocks - no directional edge (both fade and ride lose). Kill 2-bar idea.	2026-04-12T12:20:00
 apr12b	nikkei_lead_tokyo	-6.2483	-0.105178	-4.9834	-0.9640	-0.109110	0.3697	0.7708	1090	Ride 2h Nikkei momentum in Tokyo session - continuation hypothesis loses at 37% win	2026-04-12T12:40:00
 apr12b	zscore_mr_control	-4.6139	-0.119739	-5.2669	-0.8530	-0.140378	0.3996	0.8722	2345	Pure 20-bar z-score MR - 40% win rate = random path baseline. apr12 MR edge falsified.	2026-04-12T13:00:00
+apr12b	london_orb	-3.9810	-0.012001	-1.8011	-0.6578	-0.018246	0.4109	0.9170	348	Breakout of 03-07 UTC range during 07-10 UTC window - at random baseline 41%	2026-04-12T13:20:00
