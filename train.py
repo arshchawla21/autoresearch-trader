@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v37-vol-london
-=========================
-Hypothesis: v36 volume filter lifted win to 44.81% and v32 London
-restriction lifted win to 44.56%. The two filters are independent
-(session vs flow-quality). Stack them — expect win rate above 45% with
-a reduced but still meaningful trade count.
+train.py — v38-v36-plus-tnx-gate
+================================
+Hypothesis: v36 (vol-filtered v24) is the return champion. TNX (US 10Y
+futures proxy) is the fundamental driver of USD/JPY via the yield
+differential. Require TNX to have moved in the trade-supporting
+direction over the last 2 hours as a macro gate. Long JPY only if TNX
+rose (USD yields rising → USD bid); short only if TNX fell. Additive
+structural filter on top of champion.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
-LONDON_HOURS = set(range(7, 16))
+TNX_LB = 8  # 2 hours
+TNX_MIN = 0.0002  # 2bps
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -103,6 +106,25 @@ def _vol_ok(pair: pd.DataFrame) -> bool:
     return last > med
 
 
+def _tnx_supports(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+    tnx = prices.get("^TNX")
+    if tnx is None:
+        return True  # neutral if unavailable
+    ts_now = pair.index[-1]
+    ts_prev = pair.index[-1 - TNX_LB] if len(pair) > TNX_LB else pair.index[0]
+    try:
+        a = float(tnx["close"].asof(ts_now))
+        b = float(tnx["close"].asof(ts_prev))
+    except Exception:
+        return True
+    if np.isnan(a) or np.isnan(b) or b <= 0:
+        return True
+    r = float(np.log(a / b))
+    if want_long:
+        return r > TNX_MIN
+    return r < -TNX_MIN
+
+
 def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
     if len(pair) < LB_SHORT + 1:
         return False
@@ -152,12 +174,12 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if pair.index[-1].hour not in LONDON_HOURS:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     if not _vol_ok(pair):
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if not _tnx_supports(pair, prices, want_long=(s == 1)):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s

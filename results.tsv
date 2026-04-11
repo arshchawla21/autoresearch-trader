@@ -50,3 +50,4 @@ apr12b	session_asymmetric	-2.1384	-0.005727	-1.5404	-0.1614	-0.035482	0.4278	0.9
 apr12b	pct_rank_mr	-3.9241	-0.017454	-1.8993	-0.6181	-0.028237	0.4088	0.9033	433	Percentile-rank MR 500 lb top/bottom 5pct - 40.9pct win below random xasset confirm essential	2026-04-12T22:00:00
 apr12b	v24_volume_filter	-1.9703	0.011261	-1.0082	0.7289	-0.015450	0.4481	1.0645	453	NEW CHAMPION v24 + entry bar volume > 20-bar median - win 43.96->44.81 return +0.72->+1.13	2026-04-12T22:20:00
 apr12b	vol_london_stack	-2.9414	0.009039	-1.0181	1.0986	-0.008228	0.4569	1.1023	232	v36 + London hours - best win rate 45.69pct and Calmar 1.10 but only 1 trade/day	2026-04-12T22:40:00
+apr12b	v36_tnx_gate	-3.4496	0.000920	-1.3371	0.0789	-0.011661	0.4351	1.0097	262	v36 + TNX 2h supporting direction gate - TNX direction noise drops both count and quality	2026-04-12T23:00:00
