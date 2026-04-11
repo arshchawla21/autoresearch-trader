@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v68-v61-spy-xasset
-=============================
-Hypothesis: v61 uses gold/DXY/Nikkei for xasset confirm. Swap gold out
-for SPY (S&P 500) — SPY is the purest risk-on/risk-off proxy, and
-USD/JPY pullbacks tend to reverse on risk-on flows. SPY's 4-bar move
-should be more directionally informative than gold's.
+train.py — v69-v61-tight-brackets
+=================================
+Hypothesis: v61 has positive return (+2.98%) but negative Sharpe
+(-0.90) — the per-bar MTM variance is high relative to trade PnL.
+Tighten the bracket floor (TP_MIN=6, SL_MIN=4) so low-vol trades
+resolve faster with less in-trade drawdown. Same structure, smaller
+containers.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import pandas as pd
 PIP = 0.01
 TP_BASE = 15.0
 SL_BASE = 10.0
-TP_MIN, TP_MAX = 8.0, 25.0
-SL_MIN, SL_MAX = 6.0, 18.0
+TP_MIN, TP_MAX = 6.0, 20.0
+SL_MIN, SL_MAX = 4.0, 14.0
 ATR_LB = 20
 ATR_MED_LB = 200
 ATR_SPIKE_LB = 500
@@ -178,13 +179,12 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
             return float("nan")
         return float(np.log(a / b))
 
-    sr = _r(prices.get("SPY"))
+    gr = _r(prices.get("GC=F"))
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
 
     if want_long:
-        # USD/JPY down + SPY up = risk-on reversal -> long
-        if not np.isnan(sr) and jr < -MIN_MOVE and sr > MIN_MOVE:
+        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
             return True
         if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
             return True
@@ -192,7 +192,7 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
             return True
         return False
     else:
-        if not np.isnan(sr) and jr > MIN_MOVE and sr < -MIN_MOVE:
+        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
             return True
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
             return True
