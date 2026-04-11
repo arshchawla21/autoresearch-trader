@@ -106,3 +106,4 @@ apr12b	v90-tokyo-session	-4.1276	0.005738	-1.2518	0.6851	-0.008376	0.4620	1.0975
 apr12b	v91-skip-ny	-2.3000	0.013921	-0.9461	1.3785	-0.010099	0.4706	1.1269	306	skip 13-21 UTC, NY contributes positive edge	2026-04-12T00:00:00
 apr12b	v92-swing-confirm	-2.7979	0.018551	-0.7878	4.0514	-0.004579	0.5149	1.3959	134	swing + xasset AND, win rate 51.5% but trades halved	2026-04-12T00:00:00
 apr12b	v93-swing-or-xasset	-1.8470	0.009667	-1.1254	0.4672	-0.020690	0.4488	1.0431	615	OR dilutes quality, swing alone is noisy	2026-04-12T00:00:00
+apr12b	v94-swing-1bar	-2.7609	0.016304	-0.8507	2.2568	-0.007224	0.5000	1.2814	160	1-bar pullback + swing AND, marginal vs v92	2026-04-12T00:00:00

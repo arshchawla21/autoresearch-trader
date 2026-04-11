@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v93-swing-or-xasset
-================================
-Hypothesis: v92 swing-confirm lifted win rate to 51.5% but halved
-trades because swing AND xasset is too restrictive. Switch to OR:
-require EITHER a swing-reversal bar OR a cross-asset confirm. Gets
-roughly 2× the trades while retaining some quality lift.
+train.py — v94-swing-1bar
+==========================
+Hypothesis: v92 swing AND xasset was genuinely high quality (51.5%
+win, PF 1.40, MaxDD -0.46%) but too few trades (0.6/day). Relax
+pullback persistence from 2 bars to 1 bar. That should ~2× entries
+while keeping the AND quality stack intact.
 """
 
 from __future__ import annotations
@@ -146,10 +146,9 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
 
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
-    lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    if tr1 > 0 and lp1 and lp2:
+    if tr1 > 0 and lp1:
         return 1
-    if tr1 < 0 and sp1 and sp2:
+    if tr1 < 0 and sp1:
         return -1
     return 0
 
@@ -227,20 +226,18 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    # Swing-reversal OR xasset-confirm: need at least one
-    swing_ok = False
+    # Swing-reversal AND xasset-confirm
     if len(pair) >= 2:
         low1 = float(pair["low"].iloc[-1])
         low2 = float(pair["low"].iloc[-2])
         hi1 = float(pair["high"].iloc[-1])
         hi2 = float(pair["high"].iloc[-2])
-        if s == 1 and low1 > low2:
-            swing_ok = True
-        if s == -1 and hi1 < hi2:
-            swing_ok = True
+        if s == 1 and not (low1 > low2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+        if s == -1 and not (hi1 < hi2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    xa_ok = _crossasset_confirms(pair, prices, want_long=(s == 1))
-    if swing_ok or xa_ok:
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
         direction = 0
