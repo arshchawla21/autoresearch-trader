@@ -62,3 +62,4 @@ apr12b	v44_persistent_2bar	-1.4102	0.024642	-0.5880	3.3731	-0.007305	0.4818	1.21
 apr12b	v46_no_vol	-1.1878	0.023296	-0.6237	1.6325	-0.014270	0.4727	1.1348	440	v46 minus volume filter - Sharpe champion -1.19 trades 440 win 47.27pct	2026-04-13T01:50:00
 apr12b	v47_reversal_bar	-2.3504	0.015516	-0.8232	1.4184	-0.010939	0.4869	1.2040	191	v47 + close[-1] reversal bar - win 48.7pct but halves trade count return drops to +1.55	2026-04-13T02:10:00
 apr12b	v47_spy_align	-2.7373	0.005881	-1.1664	0.4062	-0.014479	0.4520	1.0537	281	v47 + SPY 8-bar trend alignment - SPY direction uninformative drops quality 47.3 to 45.2	2026-04-13T02:30:00
+apr12b	v47_dead_mkt	-1.4965	0.018139	-0.7702	1.2682	-0.014303	0.4662	1.1089	414	v47 + skip ATR below 10pct 200-bar - dead market filter mildly hurts Sharpe	2026-04-13T02:50:00

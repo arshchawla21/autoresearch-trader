@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v49-v47-spy-align
-============================
-Hypothesis: v47 Sharpe champion uses Nikkei as risk proxy but Nikkei
-trades only 8h/day. SPY (S&P) covers US hours when JPY is still very
-active. Require SPY 8-bar trend to agree with trade direction —
-long JPY aligned with risk-on SPY, short with risk-off. Additive
-global sentiment gate orthogonal to pullback family.
+train.py — v50-v47-dead-market
+==============================
+Hypothesis: v47 fires across all regimes. In very quiet markets
+(lowest 10% ATR) the oscillator signals are dominated by noise and
+there is no real move to catch. Skip when 20-bar ATR is below the 10th
+percentile of its own 200-bar distribution. Structural regime filter.
 """
 
 from __future__ import annotations
@@ -201,25 +200,32 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
+    # dead-market filter: skip when ATR is in bottom 10% of 200-bar window
+    if len(pair) >= 220:
+        highs = pair["high"].values.astype(float)
+        lows = pair["low"].values.astype(float)
+        closes_all = pair["close"].values.astype(float)
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(
+                np.abs(highs[1:] - closes_all[:-1]),
+                np.abs(lows[1:] - closes_all[:-1]),
+            ),
+        )
+        # per-bar ATR20 over the last 200 bars
+        atr_series = np.array([tr[-(200 + 20 - i):-(20 - i)].mean() if (20 - i) > 0
+                               else tr[-200:].mean() for i in range(200)])
+        # simpler: take last 200 rolling ATR20 values
+        atr_hist = np.convolve(tr, np.ones(ATR_LB) / ATR_LB, mode="valid")
+        atr_window = atr_hist[-200:] if len(atr_hist) >= 200 else atr_hist
+        cur_atr = atr_hist[-1]
+        lo_q = float(np.quantile(atr_window, 0.10))
+        if cur_atr < lo_q:
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    # SPY 8-bar alignment
-    spy = prices.get("SPY")
-    if spy is not None:
-        try:
-            ts_now = pair.index[-1]
-            ts_prev = pair.index[-9] if len(pair) > 8 else pair.index[0]
-            a = float(spy["close"].asof(ts_now))
-            b = float(spy["close"].asof(ts_prev))
-            if not (np.isnan(a) or np.isnan(b) or b <= 0):
-                spy_r = np.log(a / b)
-                if s == 1 and spy_r < 0:
-                    return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-                if s == -1 and spy_r > 0:
-                    return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-        except Exception:
-            pass
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
