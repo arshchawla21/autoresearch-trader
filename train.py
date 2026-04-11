@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v48-v47-reversal-bar
-===============================
-Hypothesis: v47 fires while the pullback is persistent but not yet
-reversing. Add a reversal-bar confirmation: close[-1] > close[-2] for
-longs, < for shorts. This means the turn has actually begun. Should
-lift win rate at the cost of some frequency.
+train.py — v49-v47-spy-align
+============================
+Hypothesis: v47 Sharpe champion uses Nikkei as risk proxy but Nikkei
+trades only 8h/day. SPY (S&P) covers US hours when JPY is still very
+active. Require SPY 8-bar trend to agree with trade direction —
+long JPY aligned with risk-on SPY, short with risk-off. Additive
+global sentiment gate orthogonal to pullback family.
 """
 
 from __future__ import annotations
@@ -203,13 +204,22 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    closes = pair["close"].values.astype(float)
-    if len(closes) >= 2:
-        turn_up = closes[-1] > closes[-2]
-        if s == 1 and not turn_up:
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-        if s == -1 and turn_up:
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    # SPY 8-bar alignment
+    spy = prices.get("SPY")
+    if spy is not None:
+        try:
+            ts_now = pair.index[-1]
+            ts_prev = pair.index[-9] if len(pair) > 8 else pair.index[0]
+            a = float(spy["close"].asof(ts_now))
+            b = float(spy["close"].asof(ts_prev))
+            if not (np.isnan(a) or np.isnan(b) or b <= 0):
+                spy_r = np.log(a / b)
+                if s == 1 and spy_r < 0:
+                    return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+                if s == -1 and spy_r > 0:
+                    return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+        except Exception:
+            pass
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
