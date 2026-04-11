@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v53-v47-weekday
-==========================
-Hypothesis: Mondays carry weekend-gap variance and Fridays see
-position-closing flows. Tue/Wed/Thu are the cleanest directional
-days. Restrict v47 to Tue-Thu only — cuts ~40% of weeks but keeps
-the clean bars.
+train.py — v54-v47-no-xasset
+============================
+Hypothesis: v47's alpha is load-bearing on the 2-bar persistent
+pullback. Cross-asset confirm may be redundant or even subtract
+quality. Remove it and test. If return holds or rises, v47's xasset
+filter was a frequency tax, not a quality gate.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
-WEEKDAYS = {1, 2, 3}  # Tue=1, Wed=2, Thu=3
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -201,14 +200,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    if pair.index[-1].dayofweek not in WEEKDAYS:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = s
-    else:
-        direction = 0
-    return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
+    return {"direction": s, "tp_pips": tp, "sl_pips": sl}
