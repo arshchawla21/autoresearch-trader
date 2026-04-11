@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v42-v36-gold-corr-regime
-===================================
-Hypothesis: v24's cross-asset confirm relies on gold as one of three
-signals. That only works when JPY-gold are in their usual safe-haven
-co-move regime. Compute rolling 100-bar correlation of JPY vs gold
-returns. Only enable v36 trades when corr > 0 (classical risk-off
-regime). When correlation is negative, the assets have decoupled and
-the xasset confirm is unreliable → skip. Novel regime gate.
+train.py — v43-v36-2of3-xasset
+==============================
+Hypothesis: v36 requires ANY 1 of gold/DXY/Nikkei to confirm. Tighten
+the structure to require at least 2 of 3. Two independent cross-asset
+peers confirming is a stronger macro signal than one, reducing
+false-positive entries on noise correlation.
 """
 
 from __future__ import annotations
@@ -30,8 +28,6 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
-CORR_LB = 100
-CORR_MIN = 0.0
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -106,39 +102,15 @@ def _vol_ok(pair: pd.DataFrame) -> bool:
     return last > med
 
 
-def _corr_ok(pair: pd.DataFrame, prices: dict) -> bool:
-    gold = prices.get("GC=F")
-    if gold is None or len(pair) < CORR_LB + 2:
-        return True
-    try:
-        g_aligned = gold["close"].reindex(pair.index[-CORR_LB - 1:], method="ffill").astype(float)
-    except Exception:
-        return True
-    p_tail = pair["close"].iloc[-CORR_LB - 1:].astype(float)
-    p_ret = np.diff(np.log(p_tail.values))
-    g_vals = g_aligned.values
-    if np.any(g_vals <= 0) or np.any(np.isnan(g_vals)):
-        return True
-    g_ret = np.diff(np.log(g_vals))
-    if len(p_ret) != len(g_ret) or len(p_ret) < 20:
-        return True
-    sd_p = p_ret.std()
-    sd_g = g_ret.std()
-    if sd_p <= 0 or sd_g <= 0:
-        return True
-    corr = float(np.mean((p_ret - p_ret.mean()) * (g_ret - g_ret.mean())) / (sd_p * sd_g))
-    return corr > CORR_MIN
-
-
-def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+def _crossasset_count(pair: pd.DataFrame, prices: dict, want_long: bool) -> int:
     if len(pair) < LB_SHORT + 1:
-        return False
+        return 0
     ts_now = pair.index[-1]
     ts_prev = pair.index[-1 - LB_SHORT]
     p_now = float(pair["close"].iloc[-1])
     p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
     if p_prev <= 0:
-        return False
+        return 0
     jr = float(np.log(p_now / p_prev))
 
     def _r(other):
@@ -157,22 +129,22 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
 
+    cnt = 0
     if want_long:
         if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
-            return True
+            cnt += 1
         if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
-            return True
+            cnt += 1
         if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
-            return True
-        return False
+            cnt += 1
     else:
         if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
-            return True
+            cnt += 1
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
-            return True
+            cnt += 1
         if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            return True
-        return False
+            cnt += 1
+    return cnt
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
@@ -184,9 +156,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     if not _vol_ok(pair):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if not _corr_ok(pair, prices):
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+    if _crossasset_count(pair, prices, want_long=(s == 1)) >= 2:
         direction = s
     else:
         direction = 0
