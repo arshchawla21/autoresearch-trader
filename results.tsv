@@ -67,3 +67,4 @@ apr12b	v47_3bar_persist	-2.2458	0.010820	-0.9802	0.8293	-0.013047	0.4682	1.0857	
 apr12b	v47_london	-2.7426	0.010553	-0.9411	1.0405	-0.010142	0.4652	1.1387	187	v47 + London hours - persistent signal does not stack with session filter drops trades	2026-04-13T03:25:00
 apr12b	v47_tue_thu	-2.8925	0.004128	-1.1486	0.2506	-0.016474	0.4559	1.0395	261	v47 Tue-Thu only - Mon/Fri actually carry v47 edge 45.6pct hurts	2026-04-13T03:40:00
 apr12b	v47_no_xasset	-2.3769	-0.010888	-1.6440	-0.3798	-0.028670	0.4335	0.9677	812	v47 minus xasset confirm - xasset adds 4pp quality proven load-bearing	2026-04-13T03:55:00
+apr12b	v47_xasset_2h	-2.7499	-0.006276	-1.5419	-0.2777	-0.022602	0.4374	0.9713	519	v47 xasset lookback 8 bars - 2h dilutes quality 4 bar optimal	2026-04-13T04:10:00

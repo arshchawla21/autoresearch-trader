@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v54-v47-no-xasset
+train.py — v55-v47-xasset-2h
 ============================
-Hypothesis: v47's alpha is load-bearing on the 2-bar persistent
-pullback. Cross-asset confirm may be redundant or even subtract
-quality. Remove it and test. If return holds or rises, v47's xasset
-filter was a frequency tax, not a quality gate.
+Hypothesis: v47 uses a 4-bar (1h) cross-asset lookback. A 2h (8-bar)
+lookback should average out 15m noise and give cleaner cross-asset
+directional signals, lifting quality at small frequency cost.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
-LB_SHORT = 4
+LB_SHORT = 8
 MIN_MOVE = 0.0005
 VOL_LB = 20
 
@@ -203,4 +202,8 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    return {"direction": s, "tp_pips": tp, "sl_pips": sl}
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+        direction = s
+    else:
+        direction = 0
+    return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
