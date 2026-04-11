@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v36-v24-vol-filter
-=============================
-Hypothesis: Volume has been completely unused in 35 experiments. v24's
-pullback signals fire on both genuine flow and noise bars. Require the
-entry bar's tick volume to exceed the 20-bar median — this filters out
-quiet-market noise pullbacks and keeps real-flow reversal setups.
-Structural additive filter on top of v24 champion.
+train.py — v37-vol-london
+=========================
+Hypothesis: v36 volume filter lifted win to 44.81% and v32 London
+restriction lifted win to 44.56%. The two filters are independent
+(session vs flow-quality). Stack them — expect win rate above 45% with
+a reduced but still meaningful trade count.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
+LONDON_HOURS = set(range(7, 16))
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -151,6 +151,8 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if pair.index[-1].hour not in LONDON_HOURS:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     s = _pullback_signal(pair)
     if s == 0:
