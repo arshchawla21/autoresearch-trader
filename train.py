@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v26-multi-horizon-trend
-==================================
-Hypothesis: v24 champion used a single 96-bar trend gate. Replace with
-an OR of three trend horizons (48/96/192 bars). A bar is eligible for
-long if ANY of them is positive (and no horizon is strongly against).
-More bars pass the gate → more pullback+cross-asset opportunities,
-same quality since the filters (z/RSI/WR + cross-asset) still apply.
+train.py — v27-vix-regime-filter
+================================
+Hypothesis: v24 champion (+0.72%, 44% win, Sharpe -1.83) may have its
+edge concentrated in a specific volatility regime. Gate it with a
+synthetic-VIX percentile filter — only trade when recent realized vol
+is in the middle 20–80% of its 500-bar rolling window. Skip both the
+dead-calm and the panic regimes.
 """
 
 from __future__ import annotations
@@ -25,9 +25,13 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-TREND_LBS = (48, 96, 192)
+TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
+
+VIX_LB = 500
+VIX_LOW_PCT = 0.20
+VIX_HIGH_PCT = 0.80
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -58,43 +62,32 @@ def _williams_r(pair: pd.DataFrame, n: int) -> float:
     return -100.0 * (hi - c) / (hi - lo)
 
 
-def _trend_direction(closes: np.ndarray) -> int:
-    """Return +1 if any horizon up and none strongly down; -1 mirror; else 0."""
-    rets = []
-    for lb in TREND_LBS:
-        if len(closes) < lb + 1:
-            continue
-        prev = float(closes[-1 - lb])
-        if prev <= 0:
-            continue
-        rets.append(float(closes[-1]) / prev - 1.0)
-    if not rets:
-        return 0
-    any_up = any(r > 0 for r in rets)
-    any_down = any(r < 0 for r in rets)
-    majority_up = sum(1 for r in rets if r > 0)
-    majority_down = sum(1 for r in rets if r < 0)
-    if majority_up >= 2 and not (majority_down >= 2):
-        return 1
-    if majority_down >= 2 and not (majority_up >= 2):
-        return -1
-    return 0
+def _vix_in_regime(vix: pd.DataFrame | None) -> bool:
+    if vix is None:
+        return True
+    s = vix["close"].dropna()
+    if len(s) < VIX_LB:
+        return True
+    window = s.iloc[-VIX_LB:].values
+    last = float(s.iloc[-1])
+    lo = float(np.quantile(window, VIX_LOW_PCT))
+    hi = float(np.quantile(window, VIX_HIGH_PCT))
+    return lo <= last <= hi
 
 
 def _pullback_signal(pair: pd.DataFrame) -> int:
     closes = pair["close"].values.astype(float)
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, max(TREND_LBS)) + 1:
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + 1:
         return 0
-
-    trend = _trend_direction(closes)
-    if trend == 0:
-        return 0
-
     last = float(closes[-1])
+    prev = float(closes[-1 - TREND_LB])
+    if prev <= 0:
+        return 0
+    trend = last / prev - 1.0
+
     win = closes[-Z_LB:]
     sd = float(win.std(ddof=1))
     z = (last - float(win.mean())) / sd if sd > 0 else 0.0
-
     rsi = _rsi(closes, RSI_LB)
     wr = _williams_r(pair, WR_LB)
 
@@ -167,6 +160,8 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if not _vix_in_regime(prices.get("^VIX")):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     s = _pullback_signal(pair)
     if s == 0:
