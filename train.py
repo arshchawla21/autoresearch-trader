@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v32-v24-london-only
-==============================
-Hypothesis: v24 champion's cross-asset confirm relies on DXY/gold/Nikkei
-actually moving. Those correlations are tightest during London hours
-when global flow is most active. Restrict v24 to 07-16 UTC and the
-per-trade edge should rise without losing structural integrity.
+train.py — v33-v24-liquid-hours
+===============================
+Hypothesis: v32 showed London hours lift v24 win rate from 43.96% to
+44.56% but halve trade count. Extend the window to 07-21 UTC (full
+Europe + NY overlap) to retain the liquidity-driven quality lift while
+getting ~2x more trades than London-only.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
-SESSION_HOURS = set(range(7, 16))  # 07-15 UTC inclusive
+SESSION_HOURS = set(range(7, 21))  # 07-20 UTC inclusive
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
