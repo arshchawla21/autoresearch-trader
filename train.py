@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v78-london-orb-fade
-==============================
-Hypothesis: v77 showed breakouts of London opening range WIN 38.65%
-— below 40% random → breakouts systematically fail on USD/JPY 15m.
-Fade them: on a close above range high, go SHORT; on a close below
-the range low, go LONG. Expected fade win rate ~60%.
+train.py — v79-vwap-fade
+========================
+Hypothesis: Session VWAP is a mean-reversion anchor distinct from
+rolling z-score. Compute an intraday VWAP from 07:00 UTC onwards
+(London session onward). When price deviates >1.5σ from VWAP, fade
+the deviation back toward VWAP. Different statistical reference than
+a rolling window.
 """
 
 from __future__ import annotations
@@ -14,14 +15,12 @@ import numpy as np
 import pandas as pd
 
 PIP = 0.01
-TP_MIN, TP_MAX = 8.0, 25.0
-SL_MIN, SL_MAX = 6.0, 18.0
+TP_MIN, TP_MAX = 6.0, 20.0
+SL_MIN, SL_MAX = 4.0, 14.0
 ATR_LB = 20
 
-# London session: UTC 07:00 to 15:00. First 4 bars (07:00-08:00) form range.
-LONDON_OPEN_HOUR = 7
-LONDON_RANGE_BARS = 4
-LONDON_TRADE_END = 12  # stop taking new entries after 12:00 UTC
+VWAP_START_HOUR = 7
+DEV_SIGMA = 1.5
 
 
 def _atr_pips(pair: pd.DataFrame, n: int) -> float:
@@ -42,21 +41,33 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
     return float(tr[-n:].mean()) / PIP
 
 
-def _session_range(pair: pd.DataFrame) -> tuple[float, float] | None:
-    """Return (high, low) of today's London opening range (bars 07:00-08:00 UTC)."""
-    if len(pair) < LONDON_RANGE_BARS:
-        return None
+def _session_dev(pair: pd.DataFrame) -> tuple[float, int]:
+    """Return (deviation_in_sigmas, trend_sign) for intraday VWAP since 07:00 UTC."""
     ts_now = pair.index[-1]
     if ts_now.tzinfo is None:
-        return None
-    day_start = ts_now.normalize()
-    # Opening range starts at LONDON_OPEN_HOUR UTC
-    range_start = day_start + pd.Timedelta(hours=LONDON_OPEN_HOUR)
-    range_end = range_start + pd.Timedelta(hours=1)  # 4 x 15min = 1h
-    window = pair[(pair.index >= range_start) & (pair.index < range_end)]
-    if len(window) < LONDON_RANGE_BARS:
-        return None
-    return float(window["high"].max()), float(window["low"].min())
+        return 0.0, 0
+    day_start = ts_now.normalize() + pd.Timedelta(hours=VWAP_START_HOUR)
+    if ts_now < day_start:
+        return 0.0, 0
+    window = pair[(pair.index >= day_start) & (pair.index <= ts_now)]
+    if len(window) < 8:
+        return 0.0, 0
+    highs = window["high"].values.astype(float)
+    lows = window["low"].values.astype(float)
+    closes = window["close"].values.astype(float)
+    vols = window["volume"].values.astype(float) if "volume" in window.columns else np.ones(len(window))
+    if vols.sum() <= 0:
+        vols = np.ones(len(window))
+    tp = (highs + lows + closes) / 3.0
+    vwap = float((tp * vols).sum() / vols.sum())
+    # Use close std as sigma estimate over the session
+    sd = float(closes.std(ddof=1)) if len(closes) > 2 else 0.0
+    if sd <= 0:
+        return 0.0, 0
+    dev = (closes[-1] - vwap) / sd
+    # Session trend: sign of last minus first
+    trend_sign = 1 if closes[-1] > closes[0] else -1
+    return dev, trend_sign
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
@@ -68,26 +79,11 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    ts = pair.index[-1]
-    if ts.tzinfo is None:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    hour_utc = ts.hour
-    # Only trade during london post-range window (08:00 - 12:00 UTC)
-    if hour_utc < LONDON_OPEN_HOUR + 1 or hour_utc >= LONDON_TRADE_END:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
-    rng = _session_range(pair)
-    if rng is None:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    hi, lo = rng
-
-    c = float(pair["close"].iloc[-1])
-    # Need a real breakout margin at least 2 pips past the range
-    margin = 2.0 * PIP
-    if c > hi + margin:
-        direction = -1  # fade the breakout
-    elif c < lo - margin:
+    dev, trend_sign = _session_dev(pair)
+    direction = 0
+    # Fade deviations beyond threshold back toward VWAP
+    if dev > DEV_SIGMA:
+        direction = -1
+    elif dev < -DEV_SIGMA:
         direction = 1
-    else:
-        direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
