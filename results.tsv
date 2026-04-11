@@ -47,3 +47,4 @@ apr12b	meta_labeling_logit	-4.1494	-0.001387	-1.3796	-0.1162	-0.011940	0.4271	0.
 apr12b	v24_london_only	-2.8320	0.006091	-1.1227	0.4356	-0.013983	0.4456	1.0555	285	v24 restricted to 07-16 UTC London - win up 0.6pp trade count halved slightly worse return	2026-04-12T21:00:00
 apr12b	v24_liquid_hours	-2.7012	0.002180	-1.3354	0.1388	-0.015708	0.4364	1.0152	385	v24 07-21 UTC Europe+NY - NY hours dilute Londons quality finding	2026-04-12T21:20:00
 apr12b	session_asymmetric	-2.1384	-0.005727	-1.5404	-0.1614	-0.035482	0.4278	0.9851	907	London v24 + Tokyo 1h momentum - Tokyo momo below random drags total quality to 42.8%	2026-04-12T21:40:00
+apr12b	pct_rank_mr	-3.9241	-0.017454	-1.8993	-0.6181	-0.028237	0.4088	0.9033	433	Percentile-rank MR 500 lb top/bottom 5pct - 40.9pct win below random xasset confirm essential	2026-04-12T22:00:00
