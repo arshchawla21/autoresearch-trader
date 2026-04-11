@@ -96,3 +96,4 @@ apr12b	v69_parkinson	-0.5543	0.036012	-0.2848	3.9327	-0.009157	0.4914	1.2460	409
 apr12b	v80_garman_klass	-1.1194	0.027047	-0.5664	2.3780	-0.011374	0.4801	1.1852	402	v80 + Garman-Klass OHLC vol instead of Parkinson - worse than pure Parkinson	2026-04-13T11:00:00
 apr12b	v80_trend48	-3.4762	-0.003118	-1.5151	-0.3208	-0.009718	0.4268	0.9759	321	v80 + TREND_LB=48 - 12h trend too short 42.68pct 24h is right	2026-04-13T11:15:00
 apr12b	v80_trend144	-1.3690	0.021322	-0.7475	1.6120	-0.013227	0.4604	1.1200	480	v80 + TREND_LB=144 36h - trend too long lower quality 46pct	2026-04-13T11:30:00
+apr12b	v80_persist_2of3	-0.9443	0.029198	-0.4912	2.8853	-0.010120	0.4816	1.1842	434	v80 + 2of3 bars persistence instead of strict 2-bar - more trades but quality drops to 48.16	2026-04-13T11:45:00

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v83-v80-trend144
-===========================
-Hypothesis: v82 showed 48-bar trend is too short. Try longer: 144
-bars (36h, 1.5 days). Captures the "real" direction over >1 session
-cycle, maybe less susceptible to day-boundary noise.
+train.py — v84-v80-persist-2of3
+===============================
+Hypothesis: v80 requires both bar -1 AND bar -2 pullback. Relaxed
+version: require 2 of the last 3 bars to show pullback (bars -1, -2,
+-3). Same "persistence" principle but allows one false bar —
+captures more trades without losing quality.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-TREND_LB = 144
+TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
@@ -146,9 +147,13 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
     lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    if tr1 > 0 and lp1 and lp2:
+    lp3, sp3, _ = _pullback_at(pair, 3, z_entry)
+    long_votes = int(lp1) + int(lp2) + int(lp3)
+    short_votes = int(sp1) + int(sp2) + int(sp3)
+    # Require bar -1 to be pullback AND at least 2 of last 3 bars
+    if tr1 > 0 and lp1 and long_votes >= 2:
         return 1
-    if tr1 < 0 and sp1 and sp2:
+    if tr1 < 0 and sp1 and short_votes >= 2:
         return -1
     return 0
 
