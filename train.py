@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v71-v69-tp-cap15
-===========================
-Hypothesis: v69 allows TP up to 20 pips (and SL up to 14). The larger
-brackets are where MTM variance comes from. Cap TP_MAX at 15 and
-SL_MAX at 10 — the same bracket family as the original baseline.
-Small-regime trades keep their tight brackets.
+train.py — v72-v69-reverse
+==========================
+Hypothesis: v69 wins 48.81% on mean reversion — genuine edge but
+Sharpe still negative. Diagnostic: reverse the direction. If the
+same signal scores >51% when flipped (trend continuation), the
+pullback is actually a break-of-extreme continuation signal, not a
+reversion. If it scores lower, MR is confirmed.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import pandas as pd
 PIP = 0.01
 TP_BASE = 15.0
 SL_BASE = 10.0
-TP_MIN, TP_MAX = 6.0, 15.0
-SL_MIN, SL_MAX = 4.0, 10.0
+TP_MIN, TP_MAX = 6.0, 20.0
+SL_MIN, SL_MAX = 4.0, 14.0
 ATR_LB = 20
 ATR_LB_FAST = 10
 ATR_MED_LB = 200
@@ -223,7 +224,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = s
+        direction = -s  # v72: reverse signal test
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}
