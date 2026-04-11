@@ -31,3 +31,4 @@ apr12b	v11_v4_confluence	-3.0645	0.002219	-1.3366	0.1710	-0.012977	0.4362	1.0197
 apr12b	triple_vote_v11_v4_nk	-3.3161	-0.034419	-2.4756	-0.8582	-0.040108	0.4100	0.9112	944	Add Nikkei divergence signal for 2-of-3 vote - Nikkei signal weak, dilutes v15 edge	2026-04-12T16:00:00
 apr12b	gold_div_trend_gate	-4.0170	-0.038937	-2.6815	-0.7207	-0.054028	0.3983	0.8708	723	v4 gated by 24h trend (no z-score) - loosening z killed the v11 component of edge	2026-04-12T16:20:00
 apr12b	hour_seasonality	-5.9552	-0.213805	-9.0853	-0.9265	-0.230757	0.3945	0.8566	3919	Warmup hour-of-day bias - hour biases do not generalize warmup->eval	2026-04-12T16:40:00
+apr12b	wick_rejection	-5.3767	-0.105502	-5.2090	-0.9426	-0.111927	0.4480	0.8404	1790	Long wicks as reversal signal - 44.8% win at 12/10 brackets is actually at random baseline	2026-04-12T17:00:00
