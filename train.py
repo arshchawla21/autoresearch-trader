@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v39-squeeze-breakout
-===============================
-Hypothesis: 38 experiments show mean-reversion variants cap near 45%
-win. Try an orthogonal regime: volatility compression followed by
-expansion. When 20-bar BB width is below its 100-bar median (squeeze),
-wait for a breakout of the 20-bar high/low and trade the direction.
-Structurally different from v36 — if it has edge it can be stacked.
+train.py — v40-squeeze-fade
+===========================
+Hypothesis: v39 showed squeeze-breakouts hit only 36.94% — below the
+TP=15/SL=10 random baseline. That means the breakouts reliably FAIL:
+price breaks the 20-bar range during vol compression, then snaps back.
+Fade the break instead — go opposite direction.
 """
 
 from __future__ import annotations
@@ -84,7 +83,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     last = float(closes[-1])
 
     if last > prior_hi:
-        return {"direction": 1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if last < prior_lo:
         return {"direction": -1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if last < prior_lo:
+        return {"direction": 1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
