@@ -77,3 +77,4 @@ apr12b	v59_vol_spike_skip	-0.9018	0.029844	-0.4619	3.0849	-0.009674	0.4844	1.193
 apr12b	v61_middle_80	-1.0661	0.027388	-0.5346	2.9422	-0.009309	0.4820	1.1860	388	v61 + also skip bottom decile ATR - dead skip hurts trade count without quality gain	2026-04-13T06:00:00
 apr12b	v61_trend_min	-3.9229	-0.005150	-1.5045	-0.5357	-0.009615	0.4304	0.9489	237	v61 + require trend magnitude ge 20bps - strong trends break MR 43pct mean rev needs weak drift	2026-04-13T06:15:00
 apr12b	v61_trend_cap	-0.9344	0.029636	-0.4714	3.0634	-0.009674	0.4851	1.2002	404	v61 + cap trend magnitude to 1pct 24h - marginal wash with v61 not adopted	2026-04-13T06:30:00
+apr12b	v61_osc_vote	-3.4697	0.001589	-1.3466	0.1062	-0.014960	0.4449	1.0175	245	v61 + 2of3 oscillator vote instead of OR - stricter kills independent captures 44.5pct	2026-04-13T06:45:00

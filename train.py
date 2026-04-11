@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v64-v61-trend-cap
-============================
-Hypothesis: v63 showed strong trends break mean reversion (the pullback
-becomes the new trend). Cap maximum trend magnitude: skip if |trend|>
-0.01 (1% over a day). Keep trades only in mild-trend regimes where
-pullbacks actually reverse.
+train.py — v65-v61-osc-vote
+===========================
+Hypothesis: v61 uses OR across z/RSI/WR (any single oscillator extreme
+fires). Require instead 2-of-3 oscillators to agree — stricter
+consensus filters out single-indicator noise and should lift win rate.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ ATR_LB = 20
 ATR_MED_LB = 200
 ATR_SPIKE_LB = 500
 ATR_SPIKE_Q = 0.90
-TREND_MAX = 0.010
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -122,24 +120,20 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    long_pullback = (
-        (zv < -z_entry)
-        or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
-        or (not np.isnan(wr_val) and wr_val < WR_LOW)
-    )
-    short_pullback = (
-        (zv > z_entry)
-        or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
-        or (not np.isnan(wr_val) and wr_val > WR_HIGH)
-    )
+    z_long = zv < -z_entry
+    z_short = zv > z_entry
+    rsi_long = (not np.isnan(rsi_val)) and rsi_val < RSI_LOW
+    rsi_short = (not np.isnan(rsi_val)) and rsi_val > RSI_HIGH
+    wr_long = (not np.isnan(wr_val)) and wr_val < WR_LOW
+    wr_short = (not np.isnan(wr_val)) and wr_val > WR_HIGH
+    long_pullback = (int(z_long) + int(rsi_long) + int(wr_long)) >= 2
+    short_pullback = (int(z_short) + int(rsi_short) + int(wr_short)) >= 2
     return long_pullback, short_pullback, trend
 
 
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
     lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    if abs(tr1) > TREND_MAX:
-        return 0
     if tr1 > 0 and lp1 and lp2:
         return 1
     if tr1 < 0 and sp1 and sp2:
