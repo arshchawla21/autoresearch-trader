@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v29-coint-spread-momo
-================================
-Hypothesis: v28 showed JPY-DXY log spread z-score fires 9.2/day but the
-mean-reversion direction is wrong (44.4% win at 49.1% breakeven). The
-signal is real but the pair residual TRENDS rather than reverts —
-USD-idiosyncratic flow pushes the spread further once it extends. Ride
-the spread breakout instead: long JPY when spread is already high, short
-when low.
+train.py — v30-macd-divergence
+==============================
+Hypothesis: MACD histogram divergence is a classic reversal pattern that
+hasn't been tested on this dataset. When price makes a lower low over
+N bars but MACD histogram makes a HIGHER low, momentum is waning and a
+reversal is likely. Mirror for bearish. Gate by 96-bar JPY trend so we
+only fade against minor counter-trend moves inside a dominant direction.
+Completely new signal family vs v24 oscillator threshold or v28 residual.
 """
 
 from __future__ import annotations
@@ -15,69 +15,111 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TP_PIPS = 12.0
+TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-SPREAD_LB = 60
-Z_ENTRY = 1.6
-MIN_HIST = 120
-
-_CACHE: dict = {}
-
-
-def _spread_series(pair: pd.DataFrame, dxy: pd.DataFrame) -> pd.Series | None:
-    if pair is None or dxy is None:
-        return None
-    # Align DXY to pair bars via asof; use only tail for speed.
-    n_tail = MIN_HIST + SPREAD_LB + 20
-    p_tail = pair.iloc[-n_tail:]
-    # For each pair timestamp, fetch latest DXY close at or before it.
-    d_close = dxy["close"].dropna()
-    if len(d_close) < SPREAD_LB + 10:
-        return None
-    try:
-        d_aligned = d_close.reindex(p_tail.index, method="ffill")
-    except Exception:
-        return None
-    if d_aligned.isna().all():
-        return None
-    p_close = p_tail["close"].astype(float)
-    valid = (~d_aligned.isna()) & (p_close > 0) & (d_aligned > 0)
-    if valid.sum() < SPREAD_LB + 5:
-        return None
-    log_pair = np.log(p_close[valid])
-    log_dxy = np.log(d_aligned[valid].astype(float))
-    return log_pair - log_dxy
+FAST = 12
+SLOW = 26
+SIG = 9
+DIV_LB = 20  # window to find swing low/high
+TREND_LB = 96
 
 
-def _spread_signal(spread: pd.Series) -> tuple[int, float]:
-    if spread is None or len(spread) < SPREAD_LB + 1:
-        return 0, 0.0
-    win = spread.iloc[-SPREAD_LB:].values
-    mu = float(win.mean())
-    sd = float(win.std(ddof=1))
-    if sd <= 0:
-        return 0, 0.0
-    last = float(spread.iloc[-1])
-    z = (last - mu) / sd
-    if z > Z_ENTRY:
-        return 1, z  # spread trending up → ride JPY long
-    if z < -Z_ENTRY:
-        return -1, z  # spread trending down → ride JPY short
-    return 0, z
+def _ema(arr: np.ndarray, n: int) -> np.ndarray:
+    alpha = 2.0 / (n + 1.0)
+    out = np.empty_like(arr)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+def _macd_hist_tail(closes: np.ndarray, n_tail: int) -> np.ndarray | None:
+    need = SLOW + SIG + n_tail + 5
+    if len(closes) < need:
+        return None
+    seg = closes[-need:]
+    ema_f = _ema(seg, FAST)
+    ema_s = _ema(seg, SLOW)
+    macd = ema_f - ema_s
+    sig = _ema(macd, SIG)
+    hist = macd - sig
+    return hist[-n_tail:]
+
+
+def _macd_divergence(pair: pd.DataFrame) -> int:
+    closes = pair["close"].values.astype(float)
+    if len(closes) < TREND_LB + 1:
+        return 0
+    hist = _macd_hist_tail(closes, DIV_LB)
+    if hist is None:
+        return 0
+    price_tail = closes[-DIV_LB:]
+
+    # Split window in half; compare recent half vs prior half
+    half = DIV_LB // 2
+    p_prev = price_tail[:half]
+    p_now = price_tail[half:]
+    h_prev = hist[:half]
+    h_now = hist[half:]
+
+    prev_low = float(p_prev.min())
+    now_low = float(p_now.min())
+    prev_high = float(p_prev.max())
+    now_high = float(p_now.max())
+
+    h_prev_low = float(h_prev.min())
+    h_now_low = float(h_now.min())
+    h_prev_high = float(h_prev.max())
+    h_now_high = float(h_now.max())
+
+    # Last bar must be at/near the recent extreme (entering on the swing)
+    last_p = float(price_tail[-1])
+    last_h = float(hist[-1])
+
+    bullish_div = (
+        now_low < prev_low
+        and h_now_low > h_prev_low
+        and last_p <= now_low * 1.0002
+        and last_h > h_now_low
+    )
+    bearish_div = (
+        now_high > prev_high
+        and h_now_high < h_prev_high
+        and last_p >= now_high * 0.9998
+        and last_h < h_now_high
+    )
+
+    if bullish_div:
+        return 1
+    if bearish_div:
+        return -1
+    return 0
+
+
+def _trend_gate(pair: pd.DataFrame, direction: int) -> bool:
+    closes = pair["close"].values.astype(float)
+    if len(closes) < TREND_LB + 1:
+        return False
+    last = float(closes[-1])
+    prev = float(closes[-1 - TREND_LB])
+    if prev <= 0:
+        return False
+    tr = last / prev - 1.0
+    if direction == 1:
+        return tr > 0
+    if direction == -1:
+        return tr < 0
+    return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    dxy = prices.get("DX-Y.NYB")
-    if pair is None or dxy is None:
+    if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if len(pair) < MIN_HIST:
+    d = _macd_divergence(pair)
+    if d == 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    spread = _spread_series(pair, dxy)
-    if spread is None:
+    if not _trend_gate(pair, d):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    direction, _z = _spread_signal(spread)
-    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    return {"direction": d, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
