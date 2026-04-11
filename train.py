@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v55-v47-xasset-2h
-============================
-Hypothesis: v47 uses a 4-bar (1h) cross-asset lookback. A 2h (8-bar)
-lookback should average out 15m noise and give cleaner cross-asset
-directional signals, lifting quality at small frequency cost.
+train.py — v56-v47-cci-or
+=========================
+Hypothesis: v47 uses z/RSI/WR ORed as pullback trigger. Add CCI
+(Commodity Channel Index) extremes as a 4th OR trigger. CCI measures
+deviation from typical-price SMA in mean-absolute-deviation units and
+catches pullbacks missed by the gaussian oscillators.
 """
 
 from __future__ import annotations
@@ -27,8 +28,11 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
+CCI_LB = 20
+CCI_LOW = -100.0
+CCI_HIGH = 100.0
 TREND_LB = 96
-LB_SHORT = 8
+LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
 
@@ -59,6 +63,20 @@ def _williams_r(pair: pd.DataFrame, n: int) -> float:
     if hi - lo <= 0:
         return float("nan")
     return -100.0 * (hi - c) / (hi - lo)
+
+
+def _cci_at(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, idx: int, n: int) -> float:
+    if idx == -1:
+        tp = (highs[-n:] + lows[-n:] + closes[-n:]) / 3.0
+    else:
+        tp = (highs[idx - n + 1 : idx + 1] + lows[idx - n + 1 : idx + 1] + closes[idx - n + 1 : idx + 1]) / 3.0
+    if len(tp) < n:
+        return float("nan")
+    mu = tp.mean()
+    md = np.abs(tp - mu).mean()
+    if md <= 0:
+        return float("nan")
+    return float((tp[-1] - mu) / (0.015 * md))
 
 
 def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
@@ -93,15 +111,19 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
+    cci_val = _cci_at(highs, lows, closes, idx, CCI_LB)
+
     long_pullback = (
         (zv < -Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
         or (not np.isnan(wr_val) and wr_val < WR_LOW)
+        or (not np.isnan(cci_val) and cci_val < CCI_LOW)
     )
     short_pullback = (
         (zv > Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
         or (not np.isnan(wr_val) and wr_val > WR_HIGH)
+        or (not np.isnan(cci_val) and cci_val > CCI_HIGH)
     )
     return long_pullback, short_pullback, trend
 
