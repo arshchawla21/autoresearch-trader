@@ -1,140 +1,85 @@
 #!/usr/bin/env python3
 """
-train.py — v2-logit-xasset
-==========================
-Hypothesis: a logistic regression on cross-asset returns (USD/JPY, DXY
-proxy, TNX, gold, Nikkei) + synthetic VIX + USD/JPY z-score, fit once
-on 90d warmup, can predict the sign of the next 4-bar USD/JPY return
-with enough edge to beat 0.8p spread. Model cached at module level.
+train.py — v3-bbands-adx-mr
+===========================
+Hypothesis: USD/JPY mean-reverts when the market is range-bound (low ADX)
+and trends when ADX is high. Gate a Bollinger-band reversion with a low-ADX
+regime filter to restrict trades to exactly the regime where reversion has
+positive expectancy. Pure price + structure, no ML.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 
 TP_PIPS = 12.0
-SL_PIPS = 8.0
-LONG_THRESH = 0.54
-SHORT_THRESH = 0.46
+SL_PIPS = 10.0
 
-FEAT_COLS = [
-    "jpy_r4", "jpy_r16",
-    "dxy_r4", "dxy_r16",
-    "tnx_r16", "gold_r16", "n225_r16",
-    "vix",
-    "jpy_z20",
-]
-
-_FITTED: tuple | None = None
+BB_LOOKBACK = 20
+BB_STD = 2.0
+ADX_LOOKBACK = 14
+ADX_MAX = 22.0  # only trade if ADX below this → range regime
+WINDOW = 80
 
 
-def _align(s: pd.Series, idx: pd.DatetimeIndex) -> pd.Series:
-    return s.reindex(idx).ffill()
-
-
-def _full_features(prices: dict[str, pd.DataFrame]):
-    pair = prices["JPY=X"]["close"].astype(float)
-    dxy = _align(prices["DX-Y.NYB"]["close"].astype(float), pair.index)
-    tnx = _align(prices["^TNX"]["close"].astype(float), pair.index)
-    gold = _align(prices["GC=F"]["close"].astype(float), pair.index)
-    n225 = _align(prices["^N225"]["close"].astype(float), pair.index)
-    vix = _align(prices["^VIX"]["close"].astype(float), pair.index)
-
-    def lr(s: pd.Series, n: int) -> pd.Series:
-        return np.log(s / s.shift(n))
-
-    feat = pd.DataFrame(
-        {
-            "jpy_r4": lr(pair, 4),
-            "jpy_r16": lr(pair, 16),
-            "dxy_r4": lr(dxy, 4),
-            "dxy_r16": lr(dxy, 16),
-            "tnx_r16": lr(tnx, 16),
-            "gold_r16": lr(gold, 16),
-            "n225_r16": lr(n225, 16),
-            "vix": vix,
-            "jpy_z20": (pair - pair.rolling(20).mean())
-            / (pair.rolling(20).std(ddof=1) + 1e-12),
-        },
-        index=pair.index,
+def _adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int) -> float:
+    if len(high) < 2 * n + 1:
+        return float("nan")
+    up_move = np.diff(high)
+    down_move = -np.diff(low)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr = np.maximum.reduce(
+        [
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1]),
+        ]
     )
-    return feat, pair
+    # Wilder smoothing via simple EMA approximation (rolling mean is fine for ADX proxy)
+    def _sma(x: np.ndarray, w: int) -> np.ndarray:
+        c = np.cumsum(np.insert(x, 0, 0.0))
+        return (c[w:] - c[:-w]) / w
 
-
-def _fit(prices: dict[str, pd.DataFrame]) -> None:
-    global _FITTED
-    feat, pair = _full_features(prices)
-    fwd = np.log(pair.shift(-4) / pair)
-    df = pd.concat([feat, fwd.rename("fwd")], axis=1).dropna()
-    df = df.iloc[:-4]  # drop last few rows with NaN forward
-    if len(df) < 500:
-        return
-    X = df[FEAT_COLS].values
-    y = (df["fwd"] > 0).astype(int).values
-    mu = X.mean(axis=0)
-    sd = X.std(axis=0, ddof=0) + 1e-12
-    Xs = (X - mu) / sd
-    model = LogisticRegression(C=0.5, max_iter=500, solver="lbfgs")
-    model.fit(Xs, y)
-    _FITTED = (model, mu, sd)
-
-
-def _last_feat_vec(prices: dict[str, pd.DataFrame]) -> np.ndarray | None:
-    pair = prices["JPY=X"]["close"].astype(float)
-    if len(pair) < 25:
-        return None
-    dxy_s = prices["DX-Y.NYB"]["close"].astype(float)
-    tnx_s = prices["^TNX"]["close"].astype(float)
-    gold_s = prices["GC=F"]["close"].astype(float)
-    n225_s = prices["^N225"]["close"].astype(float)
-    vix_s = prices["^VIX"]["close"].astype(float)
-
-    def lr(s: pd.Series, n: int) -> float:
-        if len(s) < n + 1:
-            return float("nan")
-        prev = float(s.iloc[-1 - n])
-        if prev <= 0:
-            return float("nan")
-        return float(np.log(float(s.iloc[-1]) / prev))
-
-    p20 = pair.iloc[-20:].values
-    mu20 = float(p20.mean())
-    sd20 = float(p20.std(ddof=1)) + 1e-12
-    jpy_z20 = (float(pair.iloc[-1]) - mu20) / sd20
-
-    return np.array([
-        lr(pair, 4),
-        lr(pair, 16),
-        lr(dxy_s, 4),
-        lr(dxy_s, 16),
-        lr(tnx_s, 16),
-        lr(gold_s, 16),
-        lr(n225_s, 16),
-        float(vix_s.iloc[-1]) if len(vix_s) else float("nan"),
-        jpy_z20,
-    ])
+    if len(tr) < n:
+        return float("nan")
+    atr = _sma(tr, n)
+    pdi = 100.0 * _sma(plus_dm, n) / (atr + 1e-12)
+    mdi = 100.0 * _sma(minus_dm, n) / (atr + 1e-12)
+    dx = 100.0 * np.abs(pdi - mdi) / (pdi + mdi + 1e-12)
+    if len(dx) < n:
+        return float("nan")
+    adx = _sma(dx, n)
+    return float(adx[-1])
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
-    global _FITTED
-    if _FITTED is None:
-        _fit(prices)
-    if _FITTED is None:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    model, mu, sd = _FITTED
-
-    x = _last_feat_vec(prices)
-    if x is None or np.any(np.isnan(x)):
+    pair = prices.get("JPY=X")
+    if pair is None or len(pair) < WINDOW:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    xs = ((x - mu) / sd).reshape(1, -1)
-    prob_up = float(model.predict_proba(xs)[0, 1])
+    tail = pair.iloc[-WINDOW:]
+    closes = tail["close"].values.astype(float)
+    highs = tail["high"].values.astype(float)
+    lows = tail["low"].values.astype(float)
 
-    if prob_up > LONG_THRESH:
+    adx_val = _adx(highs, lows, closes, ADX_LOOKBACK)
+    if np.isnan(adx_val) or adx_val >= ADX_MAX:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+
+    bb_slice = closes[-BB_LOOKBACK:]
+    mu = float(bb_slice.mean())
+    sd = float(bb_slice.std(ddof=1))
+    if sd <= 0:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    upper = mu + BB_STD * sd
+    lower = mu - BB_STD * sd
+    last = float(closes[-1])
+
+    if last < lower:
         direction = 1
-    elif prob_up < SHORT_THRESH:
+    elif last > upper:
         direction = -1
     else:
         direction = 0
