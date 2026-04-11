@@ -9,3 +9,4 @@ apr12	ema_trend_follow_control	-9.4957	-0.011273	-8.4524	-0.7447	-0.015138	0.298
 apr12	pair_dxy_divergence_mr	-1.2841	0.000830	-1.3351	0.0865	-0.009598	0.4023	1.0265	87	Fade USDJPY-DXY z-score divergence - no extra edge vs pure MR	2026-04-12T00:35:00
 apr12	logistic_direction_ml	-0.7212	0.002523	-0.1821	1.4059	-0.001794	0.5455	1.8015	11	Logistic on 8 features - threshold too strict (only 11 trades)	2026-04-12T00:40:00
 apr12	atr_adaptive_mr	3.2218	0.009837	3.4481	1.5105	-0.006512	0.4902	1.2076	153	Z-score MR with ATR-scaled TP/SL - more trades/higher hit rate but lower sharpe	2026-04-12T00:45:00
+apr12	histgbm_direction_ml	-5.9759	-0.013925	-8.7635	-0.6692	-0.020807	0.3578	0.8405	218	HistGradientBoosting on 13 features - warmup overfits to regime that does not generalize	2026-04-12T00:55:00
