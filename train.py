@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v87-v80-tnx-soft
-===========================
-Hypothesis: v86 showed TNX regime filter pushes win rate to 51.57%
-but cuts trades 38%. Soften: only reject a trade when TNX is moving
-AGAINST it with magnitude > 0.002 (a meaningful adverse rate move).
-Weak TNX moves ≈ noise, don't block.
+train.py — v88-v80-tnx-or
+=========================
+Hypothesis: TNX regime as a hard gate cuts trades. Instead, add TNX
+as a 4th OR option in the cross-asset confirm (any-1-of-4). This
+ADDS qualifying trades without removing any, increasing activity
+while respecting the rate-differential signal.
 """
 
 from __future__ import annotations
@@ -180,6 +180,7 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     gr = _r(prices.get("GC=F"))
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
+    tr_ = _r(prices.get("^TNX"))
 
     if want_long:
         if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
@@ -188,6 +189,9 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
             return True
         if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
             return True
+        # TNX (T-note futures) falling = yields up = USD strong -> long bias
+        if not np.isnan(tr_) and jr < -MIN_MOVE and tr_ < -MIN_MOVE:
+            return True
         return False
     else:
         if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
@@ -195,6 +199,8 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
         if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
             return True
         if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+            return True
+        if not np.isnan(tr_) and jr > MIN_MOVE and tr_ > MIN_MOVE:
             return True
         return False
 
@@ -220,26 +226,6 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
-    # TNX (US 10Y futures) 24h trend regime filter.
-    # TNX falling (futures) = yields rising = USD stronger -> favor LONG USDJPY.
-    tnx = prices.get("^TNX")
-    if tnx is not None and len(tnx) >= 97:
-        ts_now = pair.index[-1]
-        try:
-            t_now = float(tnx["close"].asof(ts_now))
-            t_prev = float(tnx["close"].asof(ts_now - pd.Timedelta(hours=24)))
-        except Exception:
-            t_now = t_prev = float("nan")
-        if not np.isnan(t_now) and not np.isnan(t_prev) and t_prev > 0:
-            tnx_trend = t_now / t_prev - 1.0
-            tnx_mag = 0.002
-            # Block only when TNX is meaningfully moving against the trade
-            if s == 1 and tnx_trend > tnx_mag:
-                return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-            if s == -1 and tnx_trend < -tnx_mag:
-                return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
