@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v91-skip-ny
-=======================
-Hypothesis: v90 Tokyo-only died because low-liquidity Asian flow
-isn't actually mean-reverting. Flip: NY session (13–21 UTC) is
-when macro headlines trend USD/JPY and kill MR. Skip NY, trade
-everything else.
+train.py — v92-swing-confirm
+=============================
+Hypothesis: v80's pullback triggers on oscillator extremes, but
+doesn't require an actual reversal bar. Add a swing-reversal
+filter: long only if last bar forms a higher-low vs prior bar
+(low[-1] > low[-2]). Short requires lower-high. Cuts entries
+that fire into continuation bars.
 """
 
 from __future__ import annotations
@@ -214,12 +215,6 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    # Skip NY session (13–21 UTC)
-    ts = pair.index[-1]
-    hour = ts.hour
-    if 13 <= hour < 21:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
     # Parkinson vol spike skip (replaces ATR-based skip in v69)
     park = _parkinson_series(pair, PARK_LB)
     if len(park) >= PARK_SPIKE_LB:
@@ -232,6 +227,18 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
+    # Swing-reversal confirm: long needs higher-low, short needs lower-high
+    if len(pair) >= 2:
+        low1 = float(pair["low"].iloc[-1])
+        low2 = float(pair["low"].iloc[-2])
+        hi1 = float(pair["high"].iloc[-1])
+        hi2 = float(pair["high"].iloc[-2])
+        if s == 1 and not (low1 > low2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+        if s == -1 and not (hi1 < hi2):
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
