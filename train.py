@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v77-london-orb
-=========================
-Hypothesis: Opening range breakout is a completely different signal
-family from v69's pullback MR. The London session open (~07:00 UTC)
-has the sharpest directional flow in FX. Compute the range of the
-first 4 bars (7:00-8:00 UTC), then on bars 5-20 of the London session,
-enter long on a close above the range high, short on a close below
-the range low. Bracket with ATR-scaled TP=1.5×ATR, SL=1.0×ATR.
+train.py — v78-london-orb-fade
+==============================
+Hypothesis: v77 showed breakouts of London opening range WIN 38.65%
+— below 40% random → breakouts systematically fail on USD/JPY 15m.
+Fade them: on a close above range high, go SHORT; on a close below
+the range low, go LONG. Expected fade win rate ~60%.
 """
 
 from __future__ import annotations
@@ -87,9 +85,9 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     # Need a real breakout margin at least 2 pips past the range
     margin = 2.0 * PIP
     if c > hi + margin:
-        direction = 1
+        direction = -1  # fade the breakout
     elif c < lo - margin:
-        direction = -1
+        direction = 1
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}

@@ -90,3 +90,4 @@ apr12b	v69_2to1	-1.1115	0.023678	-0.6431	2.1247	-0.011144	0.3917	1.1395	411	v69 
 apr12b	v69_xasset_quiet	-130.3446	-0.000684	-3.5622	-1.0000	-0.000684	0.0000	0.0000	1	v69 + require xassets quiet - too strict only 1 trade fired	2026-04-13T09:25:00
 apr12b	v69_dual_z	-2.1693	0.017334	-0.8888	2.1174	-0.008186	0.4729	1.1884	258	v69 + require 20-bar AND 40-bar z both extreme - too strict trades drop to 258	2026-04-13T09:40:00
 apr12b	london_orb	-4.2414	-0.024561	-2.3215	-0.8433	-0.029125	0.3865	0.8578	370	London opening range breakout - 38.65pct below random breakouts fail fading should work	2026-04-13T09:55:00
+apr12b	london_orb_fade	-3.9232	-0.023645	-1.9996	-0.7079	-0.033400	0.3980	0.8726	402	Fade London opening range breakout - 39.8pct random ORB carries no info either direction	2026-04-13T10:10:00
