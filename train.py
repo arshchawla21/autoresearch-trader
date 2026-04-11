@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v47-v46-no-vol
-=========================
-Hypothesis: v46 has both persistent (2-bar) pullback AND volume
-filter. These may be redundant — a 2-bar persistent pullback is
-already rare and substantive. Remove volume filter and see if trade
-count rises without losing quality.
+train.py — v48-v47-reversal-bar
+===============================
+Hypothesis: v47 fires while the pullback is persistent but not yet
+reversing. Add a reversal-bar confirmation: close[-1] > close[-2] for
+longs, < for shorts. This means the turn has actually begun. Should
+lift win rate at the cost of some frequency.
 """
 
 from __future__ import annotations
@@ -203,6 +203,13 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    closes = pair["close"].values.astype(float)
+    if len(closes) >= 2:
+        turn_up = closes[-1] > closes[-2]
+        if s == 1 and not turn_up:
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+        if s == -1 and turn_up:
+            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
