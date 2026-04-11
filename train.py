@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v82-v80-trend48
-==========================
-Hypothesis: v80 uses 96-bar (24h) trend lookback. For 15m MR trading
-with 1.5×ATR TP, maybe a 48-bar (12h) trend is more directly
-relevant — tracks intraday regime rather than cross-session drift.
+train.py — v83-v80-trend144
+===========================
+Hypothesis: v82 showed 48-bar trend is too short. Try longer: 144
+bars (36h, 1.5 days). Captures the "real" direction over >1 session
+cycle, maybe less susceptible to day-boundary noise.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-TREND_LB = 48
+TREND_LB = 144
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
