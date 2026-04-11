@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v86-v80-tnx-regime
-=============================
-Hypothesis: US 10Y futures (^TNX / USB10Y) drive USD/JPY via yield
-differential. Use TNX 24h trend as a regime gate: allow LONG JPY
-pullbacks only when TNX is falling (rates rising, USD strong); allow
-SHORT pullbacks only when TNX is rising. This adds a macro tailwind
-filter on top of the 96-bar price trend.
+train.py — v87-v80-tnx-soft
+===========================
+Hypothesis: v86 showed TNX regime filter pushes win rate to 51.57%
+but cuts trades 38%. Soften: only reject a trade when TNX is moving
+AGAINST it with magnitude > 0.002 (a meaningful adverse rate move).
+Weak TNX moves ≈ noise, don't block.
 """
 
 from __future__ import annotations
@@ -234,10 +233,11 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
             t_now = t_prev = float("nan")
         if not np.isnan(t_now) and not np.isnan(t_prev) and t_prev > 0:
             tnx_trend = t_now / t_prev - 1.0
-            # Long pullback only when TNX is falling (rates up); short only when TNX rising.
-            if s == 1 and tnx_trend > 0:
+            tnx_mag = 0.002
+            # Block only when TNX is meaningfully moving against the trade
+            if s == 1 and tnx_trend > tnx_mag:
                 return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-            if s == -1 and tnx_trend < 0:
+            if s == -1 and tnx_trend < -tnx_mag:
                 return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):

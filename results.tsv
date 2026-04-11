@@ -99,3 +99,4 @@ apr12b	v80_trend144	-1.3690	0.021322	-0.7475	1.6120	-0.013227	0.4604	1.1200	480	
 apr12b	v80_persist_2of3	-0.9443	0.029198	-0.4912	2.8853	-0.010120	0.4816	1.1842	434	v80 + 2of3 bars persistence instead of strict 2-bar - more trades but quality drops to 48.16	2026-04-13T11:45:00
 apr12b	v80_spike85	-0.6860	0.034101	-0.3457	4.0254	-0.008472	0.4911	1.2441	395	v80 + Parkinson skip at 85 pct - removes more bars lower return DD -0.85 marginal	2026-04-13T12:00:00
 apr12b	v80_tnx_regime	-1.3366	0.027304	-0.5516	3.8869	-0.007025	0.5157	1.3080	254	v80 + TNX 24h trend regime filter - WIN RATE BREAKS 50pct 51.57 DD -0.70 but 38pct fewer trades	2026-04-13T12:20:00
+apr12b	v80_tnx_soft	-0.9582	0.030217	-0.4621	3.6919	-0.008185	0.4892	1.2285	370	v80 + TNX regime soft threshold 20bps - dilutes TNX signal still worse than v80	2026-04-13T12:35:00
