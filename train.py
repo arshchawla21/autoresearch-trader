@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v63-v61-trend-magnitude
-==================================
-Hypothesis: v61 requires only trend>0 or trend<0 — any positive/negative
-drift triggers the gate. Require a meaningful trend magnitude (|trend|>=
-0.002, i.e., ~20bps over a day). Mean-reverting into a flat "trend"
-is indistinguishable from counter-trend trading; require real trends.
+train.py — v64-v61-trend-cap
+============================
+Hypothesis: v63 showed strong trends break mean reversion (the pullback
+becomes the new trend). Cap maximum trend magnitude: skip if |trend|>
+0.01 (1% over a day). Keep trades only in mild-trend regimes where
+pullbacks actually reverse.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ ATR_LB = 20
 ATR_MED_LB = 200
 ATR_SPIKE_LB = 500
 ATR_SPIKE_Q = 0.90
-TREND_MIN = 0.002
+TREND_MAX = 0.010
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -138,9 +138,11 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
     lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    if tr1 > TREND_MIN and lp1 and lp2:
+    if abs(tr1) > TREND_MAX:
+        return 0
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if tr1 < -TREND_MIN and sp1 and sp2:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
