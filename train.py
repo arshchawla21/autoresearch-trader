@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v3-bbands-adx-mr
-===========================
-Hypothesis: USD/JPY mean-reverts when the market is range-bound (low ADX)
-and trends when ADX is high. Gate a Bollinger-band reversion with a low-ADX
-regime filter to restrict trades to exactly the regime where reversion has
-positive expectancy. Pure price + structure, no ML.
+train.py — v4-gold-jpy-divergence
+=================================
+Hypothesis: USD/JPY and gold (XAU/USD) are structurally inversely correlated
+(USD strength drives JPY up / gold down). When they move in the *same*
+direction intraday, it's an anomaly that tends to resolve by USD/JPY
+reverting. Fade USD/JPY's current direction when gold confirms divergence.
 """
 
 from __future__ import annotations
@@ -13,74 +13,45 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TP_PIPS = 12.0
+TP_PIPS = 10.0
 SL_PIPS = 10.0
 
-BB_LOOKBACK = 20
-BB_STD = 2.0
-ADX_LOOKBACK = 14
-ADX_MAX = 22.0  # only trade if ADX below this → range regime
-WINDOW = 80
-
-
-def _adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, n: int) -> float:
-    if len(high) < 2 * n + 1:
-        return float("nan")
-    up_move = np.diff(high)
-    down_move = -np.diff(low)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr = np.maximum.reduce(
-        [
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1]),
-        ]
-    )
-    # Wilder smoothing via simple EMA approximation (rolling mean is fine for ADX proxy)
-    def _sma(x: np.ndarray, w: int) -> np.ndarray:
-        c = np.cumsum(np.insert(x, 0, 0.0))
-        return (c[w:] - c[:-w]) / w
-
-    if len(tr) < n:
-        return float("nan")
-    atr = _sma(tr, n)
-    pdi = 100.0 * _sma(plus_dm, n) / (atr + 1e-12)
-    mdi = 100.0 * _sma(minus_dm, n) / (atr + 1e-12)
-    dx = 100.0 * np.abs(pdi - mdi) / (pdi + mdi + 1e-12)
-    if len(dx) < n:
-        return float("nan")
-    adx = _sma(dx, n)
-    return float(adx[-1])
+LB = 4                 # 1h lookback
+MIN_JPY_MOVE = 0.0005  # 5bps
+MIN_GOLD_MOVE = 0.0005
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < WINDOW:
+    gold = prices.get("GC=F")
+    if pair is None or gold is None or len(pair) < LB + 1:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    tail = pair.iloc[-WINDOW:]
-    closes = tail["close"].values.astype(float)
-    highs = tail["high"].values.astype(float)
-    lows = tail["low"].values.astype(float)
-
-    adx_val = _adx(highs, lows, closes, ADX_LOOKBACK)
-    if np.isnan(adx_val) or adx_val >= ADX_MAX:
+    p_now = float(pair["close"].iloc[-1])
+    p_prev = float(pair["close"].iloc[-1 - LB])
+    if p_prev <= 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    bb_slice = closes[-BB_LOOKBACK:]
-    mu = float(bb_slice.mean())
-    sd = float(bb_slice.std(ddof=1))
-    if sd <= 0:
+    idx_now = pair.index[-1]
+    idx_prev = pair.index[-1 - LB]
+    gc = gold["close"]
+    try:
+        g_now = float(gc.asof(idx_now))
+        g_prev = float(gc.asof(idx_prev))
+    except Exception:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    upper = mu + BB_STD * sd
-    lower = mu - BB_STD * sd
-    last = float(closes[-1])
+    if np.isnan(g_now) or np.isnan(g_prev) or g_prev <= 0:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    if last < lower:
-        direction = 1
-    elif last > upper:
-        direction = -1
+    jpy_ret = np.log(p_now / p_prev)
+    gld_ret = np.log(g_now / g_prev)
+
+    # Anomaly: both moved same direction with meaningful magnitude.
+    if jpy_ret > MIN_JPY_MOVE and gld_ret > MIN_GOLD_MOVE:
+        direction = -1          # fade JPY up
+    elif jpy_ret < -MIN_JPY_MOVE and gld_ret < -MIN_GOLD_MOVE:
+        direction = 1           # fade JPY down
     else:
         direction = 0
+
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
