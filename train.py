@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v66-v61-adaptive-minmove
-===================================
-Hypothesis: v61 uses fixed MIN_MOVE=5bps in xasset confirm regardless
-of vol regime. In high-vol regimes 5bps is noise; in dead markets it's
-never reached. Scale MIN_MOVE by ATR ratio (same mechanism as adaptive
-Z). Should keep xasset confirm informative across vol regimes.
+train.py — v67-v61-multi-trend
+==============================
+Hypothesis: v61 uses a single 96-bar (1 day) trend gate. Replace with
+3-tier multi-timeframe trend: require majority (2-of-3) of {24-bar,
+96-bar, 288-bar} trends to agree in sign. Captures strategies where
+short-term mean reversion happens within an agreed medium+long trend.
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
+TREND_LB_S = 24
 TREND_LB = 96
+TREND_LB_L = 288
 LB_SHORT = 4
-MIN_MOVE_BASE = 0.0005
-MIN_MOVE_MIN = 0.0003
-MIN_MOVE_MAX = 0.0010
+MIN_MOVE = 0.0005
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -79,25 +79,17 @@ def _atr_series(pair: pd.DataFrame, n: int) -> np.ndarray:
     return atr
 
 
-def _vol_ratio(pair: pd.DataFrame) -> float:
+def _adaptive_z(pair: pd.DataFrame) -> float:
     atr_ser = _atr_series(pair, ATR_LB)
     if len(atr_ser) < ATR_MED_LB:
-        return 1.0
+        return Z_ENTRY_BASE
     cur = float(atr_ser[-1])
     med = float(np.median(atr_ser[-ATR_MED_LB:]))
     if med <= 0:
-        return 1.0
-    return cur / med
-
-
-def _adaptive_z(ratio: float) -> float:
+        return Z_ENTRY_BASE
+    ratio = cur / med
     z = Z_ENTRY_BASE * ratio
     return max(Z_ENTRY_MIN, min(Z_ENTRY_MAX, z))
-
-
-def _adaptive_minmove(ratio: float) -> float:
-    mm = MIN_MOVE_BASE * ratio
-    return max(MIN_MOVE_MIN, min(MIN_MOVE_MAX, mm))
 
 
 def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool, bool, float]:
@@ -105,13 +97,28 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     idx = -offset
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB_L) + offset + 1:
         return False, False, 0.0
     last = float(closes[idx])
-    prev = float(closes[idx - TREND_LB])
-    if prev <= 0:
-        return False, False, 0.0
-    trend = last / prev - 1.0
+    # 3-tier trend vote: short/medium/long lookbacks
+    lbs = (TREND_LB_S, TREND_LB, TREND_LB_L)
+    votes = 0
+    for lb in lbs:
+        base = float(closes[idx - lb])
+        if base <= 0:
+            return False, False, 0.0
+        r = last / base - 1.0
+        if r > 0:
+            votes += 1
+        elif r < 0:
+            votes -= 1
+    # trend signal: +1 if majority positive, -1 if majority negative, 0 otherwise
+    if votes >= 1:
+        trend = 1.0
+    elif votes <= -1:
+        trend = -1.0
+    else:
+        trend = 0.0
 
     win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
     sd = float(win.std(ddof=1))
@@ -165,7 +172,8 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
     return float(tr[-n:].mean()) / PIP
 
 
-def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool, mm: float) -> bool:
+def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+    mm = MIN_MOVE
     if len(pair) < LB_SHORT + 1:
         return False
     ts_now = pair.index[-1]
@@ -227,13 +235,11 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         if cur_atr > thresh:
             return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    ratio = _vol_ratio(pair)
-    z_entry = _adaptive_z(ratio)
-    mm = _adaptive_minmove(ratio)
+    z_entry = _adaptive_z(pair)
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1), mm=mm):
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
     else:
         direction = 0

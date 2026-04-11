@@ -79,3 +79,4 @@ apr12b	v61_trend_min	-3.9229	-0.005150	-1.5045	-0.5357	-0.009615	0.4304	0.9489	2
 apr12b	v61_trend_cap	-0.9344	0.029636	-0.4714	3.0634	-0.009674	0.4851	1.2002	404	v61 + cap trend magnitude to 1pct 24h - marginal wash with v61 not adopted	2026-04-13T06:30:00
 apr12b	v61_osc_vote	-3.4697	0.001589	-1.3466	0.1062	-0.014960	0.4449	1.0175	245	v61 + 2of3 oscillator vote instead of OR - stricter kills independent captures 44.5pct	2026-04-13T06:45:00
 apr12b	v61_adapt_minmove	-1.4923	0.020029	-0.7835	2.1853	-0.009165	0.4698	1.1230	447	v61 + xasset MIN_MOVE scaled by vol ratio - too permissive in low vol 46.98pct	2026-04-13T07:00:00
+apr12b	v61_multi_trend	-1.5559	0.021611	-0.7211	1.7849	-0.012108	0.4833	1.1772	329	v61 + 3-tier trend vote 24/96/288 - strict multi-trend filters out weak-trend trades	2026-04-13T07:20:00
