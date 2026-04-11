@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v51-v47-3bar-persist
-===============================
-Hypothesis: v47 requires pullback to hold on 2 consecutive bars. Try
-3 consecutive — even stricter persistence. Should lift quality at
-some frequency cost. Test where the sweet spot lives.
+train.py — v52-v47-london
+=========================
+Hypothesis: London session (07-16 UTC) marginally lifted v24 family
+quality. Test whether it stacks with v47 persistent-pullback champion
+to push Sharpe above 0.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
+LONDON_HOURS = set(range(7, 16))
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -109,10 +110,9 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
 def _pullback_signal(pair: pd.DataFrame) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1)
     lp2, sp2, _ = _pullback_at(pair, 2)
-    lp3, sp3, _ = _pullback_at(pair, 3)
-    if tr1 > 0 and lp1 and lp2 and lp3:
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if tr1 < 0 and sp1 and sp2 and sp3:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
@@ -199,6 +199,9 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     atr = _atr_pips(pair, ATR_LB)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
+
+    if pair.index[-1].hour not in LONDON_HOURS:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     s = _pullback_signal(pair)
     if s == 0:
