@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v5-shock-fade
+train.py — v6-shock-ride
 ========================
-Hypothesis: sharp 30-minute (2-bar) price shocks in USD/JPY tend to
-over-extend and reverse. Measure the 2-bar log return as a z-score
-against its recent 60-bar stdev; when the shock exceeds 2σ, fade it.
-Asymmetric 15/10 brackets so spread doesn't eat the edge.
+Hypothesis (flip of v5): 2-bar shocks don't revert, they continue. v5 fading
+>2σ shocks produced a 39% win rate — the mirror image is the edge. Ride
+the shock: when the 2-bar z of log-returns exceeds 2σ, trade *with* the
+direction, TP=15 / SL=10.
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     z = last / sd
 
     if z > Z_ENTRY:
-        direction = -1
-    elif z < -Z_ENTRY:
         direction = 1
+    elif z < -Z_ENTRY:
+        direction = -1
     else:
         direction = 0
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
