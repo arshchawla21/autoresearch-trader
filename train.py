@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v84-v80-persist-2of3
-===============================
-Hypothesis: v80 requires both bar -1 AND bar -2 pullback. Relaxed
-version: require 2 of the last 3 bars to show pullback (bars -1, -2,
--3). Same "persistence" principle but allows one false bar —
-captures more trades without losing quality.
+train.py — v85-v80-spike85
+==========================
+Hypothesis: v80 skips top-decile Parkinson vol. Stricter: skip top
+15% (keep 85% of bars). Removes more of the tail but also more of
+the "moderate" spike bars. Test if the win rate improves further.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ ATR_LB = 20
 PARK_LB = 20
 PARK_MED_LB = 200
 PARK_SPIKE_LB = 500
-PARK_SPIKE_Q = 0.90
+PARK_SPIKE_Q = 0.85
 
 Z_LB = 20
 Z_ENTRY_BASE = 1.2
@@ -147,13 +146,9 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
     lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
-    lp3, sp3, _ = _pullback_at(pair, 3, z_entry)
-    long_votes = int(lp1) + int(lp2) + int(lp3)
-    short_votes = int(sp1) + int(sp2) + int(sp3)
-    # Require bar -1 to be pullback AND at least 2 of last 3 bars
-    if tr1 > 0 and lp1 and long_votes >= 2:
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if tr1 < 0 and sp1 and short_votes >= 2:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
