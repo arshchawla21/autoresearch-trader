@@ -1,70 +1,61 @@
 #!/usr/bin/env python3
 """
-train.py — Strategy v5: RSI + Bollinger Double Confirmation
-============================================================
-Hypothesis: z-score mean reversion worked because USD/JPY 15m reverts from
-extremes. But z-score triggers on any std deviation, which is noisy. A
-stricter "overbought / oversold" gate using both Bollinger Bands AND a
-classical RSI should increase hit rate at the cost of fewer trades. This
-tests whether the mean-reversion edge is structural (strong trigger pays
-for the lost volume) or opportunistic (frequent weak triggers are
-what make it work).
+train.py — Strategy v6: VIX-Gated Mean Reversion
+==================================================
+Hypothesis: v4 (z-score MR) worked at Sharpe 4.84. Mean reversion is known
+to break down during risk-off shocks where trends run further than normal.
+Gate the z-score fade by VIX regime: only take MR trades when VIX is below
+its own rolling median (calm regime). When VIX is elevated, stay flat —
+don't catch falling knives.
 """
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-BB_LOOKBACK = 20
-BB_K = 2.0
-
-RSI_LOOKBACK = 14
-RSI_HI = 70.0
-RSI_LO = 30.0
-
-
-def _rsi(closes: np.ndarray, n: int) -> float:
-    diffs = np.diff(closes)
-    gains = np.clip(diffs, 0.0, None)
-    losses = np.clip(-diffs, 0.0, None)
-    if len(gains) < n:
-        return 50.0
-    avg_gain = float(np.mean(gains[-n:]))
-    avg_loss = float(np.mean(losses[-n:]))
-    if avg_loss <= 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+Z_LOOKBACK = 20
+Z_ENTRY = 1.5
+VIX_LOOKBACK = 96          # ~1 day of 15m bars of VIX
+VIX_PCTL = 0.60            # only trade when VIX is below 60th pct of its day
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < max(BB_LOOKBACK, RSI_LOOKBACK) + 2:
+    if pair is None or len(pair) < Z_LOOKBACK + 1:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    closes = pair["close"].dropna().values
-    if len(closes) < BB_LOOKBACK + 2:
+    closes = pair["close"].dropna()
+    if len(closes) < Z_LOOKBACK + 1:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    window = closes[-BB_LOOKBACK:]
-    mu = float(np.mean(window))
-    sd = float(np.std(window, ddof=1))
+    window = closes.iloc[-Z_LOOKBACK:]
+    mu = float(window.mean())
+    sd = float(window.std(ddof=1))
     if sd <= 0:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    z = (float(closes.iloc[-1]) - mu) / sd
 
-    px = float(closes[-1])
-    upper = mu + BB_K * sd
-    lower = mu - BB_K * sd
-    rsi = _rsi(closes, RSI_LOOKBACK)
+    # VIX regime gate
+    vix = prices.get("^VIX")
+    calm_regime = True
+    if vix is not None and len(vix) >= VIX_LOOKBACK:
+        vix_closes = vix["close"].dropna()
+        if len(vix_closes) >= VIX_LOOKBACK:
+            recent_vix = float(vix_closes.iloc[-1])
+            vix_window = vix_closes.iloc[-VIX_LOOKBACK:]
+            pctl_threshold = float(vix_window.quantile(VIX_PCTL))
+            calm_regime = recent_vix <= pctl_threshold
 
-    if px >= upper and rsi >= RSI_HI:
+    if not calm_regime:
+        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+
+    if z > Z_ENTRY:
         direction = -1
-    elif px <= lower and rsi <= RSI_LO:
+    elif z < -Z_ENTRY:
         direction = 1
     else:
         direction = 0
