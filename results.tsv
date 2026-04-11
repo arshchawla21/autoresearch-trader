@@ -87,3 +87,4 @@ apr12b	v69_tp_cap15	-1.2459	0.026009	-0.6346	3.0806	-0.008443	0.4801	1.1833	427	
 apr12b	v69_reversed	-7.3495	-0.063181	-3.5580	-0.9803	-0.064447	0.3229	0.6323	384	v69 signal reversed as diagnostic - 32.3pct confirms MR edge is real not random	2026-04-13T08:40:00
 apr12b	v69_1to1	-2.4842	0.011055	-1.0522	0.9496	-0.011642	0.5616	1.0831	438	v69 + 1:1 TP:SL - win 56.16pct MR edge is strong but 0.8p spread eats small wins PF 1.08	2026-04-13T08:55:00
 apr12b	v69_2to1	-1.1115	0.023678	-0.6431	2.1247	-0.011144	0.3917	1.1395	411	v69 + 2:1 TP:SL - win 39.17pct bracket ratio 1.5:1 remains sweet spot	2026-04-13T09:10:00
+apr12b	v69_xasset_quiet	-130.3446	-0.000684	-3.5622	-1.0000	-0.000684	0.0000	0.0000	1	v69 + require xassets quiet - too strict only 1 trade fired	2026-04-13T09:25:00

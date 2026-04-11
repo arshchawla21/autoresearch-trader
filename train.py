@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v74-v69-2to1
-=======================
-Hypothesis: v73 at 1:1 showed 56% win (strong MR edge but wins too
-small vs 0.8p spread). v69 at 1.5:1 gave 48.8%. Try 2:1 brackets
-(TP=2×ATR, SL=1×ATR): win rate will drop further but each win is
-2× loss, so expected PF rises if signal edge holds.
+train.py — v75-v69-xasset-quiet
+===============================
+Hypothesis: v69 requires cross-asset confirm (others moved with JPY).
+Opposite idea: trade when JPY moved *alone* — the xassets are quiet
+(|xasset 4h return| < half MIN_MOVE). Pure JPY noise that has nothing
+to do with macro is most likely to mean-revert cleanly.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import pandas as pd
 PIP = 0.01
 TP_BASE = 15.0
 SL_BASE = 10.0
-TP_MIN, TP_MAX = 8.0, 25.0
-SL_MIN, SL_MAX = 4.0, 12.0
+TP_MIN, TP_MAX = 6.0, 20.0
+SL_MIN, SL_MAX = 4.0, 14.0
 ATR_LB = 20
 ATR_LB_FAST = 10
 ATR_MED_LB = 200
@@ -182,23 +182,21 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     gr = _r(prices.get("GC=F"))
     dr = _r(prices.get("DX-Y.NYB"))
     nr = _r(prices.get("^N225"))
+    quiet_thresh = MIN_MOVE / 2.0
 
-    if want_long:
-        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
-            return True
+    # Require JPY meaningful move AND xassets quiet (all below half threshold)
+    if abs(jr) < MIN_MOVE:
         return False
-    else:
-        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            return True
+    def quiet(r):
+        return np.isnan(r) or abs(r) < quiet_thresh
+    if not (quiet(gr) and quiet(dr) and quiet(nr)):
         return False
+    # JPY moved alone - take the pullback signal
+    if want_long and jr < 0:
+        return True
+    if (not want_long) and jr > 0:
+        return True
+    return False
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
@@ -207,7 +205,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
 
     atr = _atr_pips(pair, ATR_LB)
-    tp = max(TP_MIN, min(TP_MAX, 2.0 * atr))
+    tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
     # Vol spike skip: stand aside in top decile of 500-bar ATR distribution
