@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v46-v44-persistent
-=============================
-Hypothesis: v44 fires on single-bar pullback triggers that may be
-fleeting intrabar spikes. Require the pullback oscillator to be valid
-on BOTH the current bar AND the prior bar. Persistent condition should
-filter noisy one-bar false signals.
+train.py — v47-v46-no-vol
+=========================
+Hypothesis: v46 has both persistent (2-bar) pullback AND volume
+filter. These may be redundant — a 2-bar persistent pullback is
+already rare and substantive. Remove volume filter and see if trade
+count rises without losing quality.
 """
 
 from __future__ import annotations
@@ -202,8 +202,6 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
 
     s = _pullback_signal(pair)
     if s == 0:
-        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if not _vol_ok(pair):
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
