@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v28-coint-spread-mr
-==============================
-Hypothesis: USD/JPY and DXY proxy share a common USD factor. Deviations
-of log(JPY) - log(DXY) from its recent mean are dollar-pair idiosyncratic
-moves that tend to mean-revert. Fade extreme z-scores of the 60-bar log
-spread. Structurally novel vs v24 oscillator family — the signal lives
-in the cross-asset residual itself, not in a technical oscillator on JPY.
+train.py — v29-coint-spread-momo
+================================
+Hypothesis: v28 showed JPY-DXY log spread z-score fires 9.2/day but the
+mean-reversion direction is wrong (44.4% win at 49.1% breakeven). The
+signal is real but the pair residual TRENDS rather than reverts —
+USD-idiosyncratic flow pushes the spread further once it extends. Ride
+the spread breakout instead: long JPY when spread is already high, short
+when low.
 """
 
 from __future__ import annotations
@@ -60,9 +61,9 @@ def _spread_signal(spread: pd.Series) -> tuple[int, float]:
     last = float(spread.iloc[-1])
     z = (last - mu) / sd
     if z > Z_ENTRY:
-        return -1, z  # spread rich → JPY overvalued vs DXY → short JPY
+        return 1, z  # spread trending up → ride JPY long
     if z < -Z_ENTRY:
-        return 1, z  # spread cheap → long JPY
+        return -1, z  # spread trending down → ride JPY short
     return 0, z
 
 

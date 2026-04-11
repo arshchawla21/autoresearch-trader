@@ -41,3 +41,4 @@ apr12b	trend_xasset_only	-3.4402	-0.049486	-3.0291	-0.7305	-0.067739	0.4078	0.90
 apr12b	multi_horizon_trend	-2.3596	-0.002236	-1.4739	-0.1045	-0.021397	0.4306	0.9918	620	Replace 96-bar trend with 48/96/192 OR majority - horizon mixing dilutes edge	2026-04-12T19:20:00
 apr12b	vix_regime_filter	-2.5575	0.000875	-1.4135	0.0574	-0.015239	0.4338	1.0056	461	v24+VIX 20-80 percentile gate - kills 30% of trades no quality lift, regime thesis wrong	2026-04-12T19:40:00
 apr12b	coint_spread_mr	-5.9673	-0.130546	-5.8828	-0.9450	-0.138143	0.4439	0.8264	2050	Fade JPY-DXY log spread z - wrong direction spread trends not reverts 9.2 trades/day	2026-04-12T19:50:00
+apr12b	coint_spread_momo	-4.6251	-0.092244	-4.5905	-0.9045	-0.101979	0.4575	0.8760	2035	Ride JPY-DXY spread breakout - still below 49.1% breakeven no directional edge either way	2026-04-12T20:00:00
