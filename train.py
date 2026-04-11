@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v57-v47-exhaustion
-=============================
-Hypothesis: v47 persistence requires pullback valid on 2 consecutive bars.
-But it doesn't require the pullback to be *ending*. Add exhaustion: the
-z-score on the current bar must be LESS extreme than on the prior bar
-(i.e., the pullback has bottomed and is starting to reverse). This should
-lift win rate by catching the turn rather than entering mid-dip.
+train.py — v58-v47-mom-align
+============================
+Hypothesis: v47 uses z/RSI/WR to detect "extreme" pullbacks but doesn't
+check the magnitude of the pullback against the trend. Add explicit
+short-term momentum alignment: the 8-bar (2h) return must be opposite
+to trend by at least MIN_MOVE. This makes the pullback a real
+countermove, not just an oscillator quirk.
 """
 
 from __future__ import annotations
@@ -31,7 +31,9 @@ WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
 LB_SHORT = 4
+LB_MOM = 8
 MIN_MOVE = 0.0005
+MOM_MIN = 0.0008
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -63,19 +65,25 @@ def _z_at(closes: np.ndarray, idx: int, n: int) -> float:
     return float((closes[idx] - float(win.mean())) / sd)
 
 
-def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float, float]:
-    """Return (long_pullback, short_pullback, trend, z) at bar -offset."""
+def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
+    """Return (long_pullback, short_pullback, trend) at bar -offset."""
     closes = pair["close"].values.astype(float)
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     idx = -offset
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
-        return False, False, 0.0, float("nan")
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB, LB_MOM + 1) + offset + 1:
+        return False, False, 0.0
     last = float(closes[idx])
     prev = float(closes[idx - TREND_LB])
     if prev <= 0:
-        return False, False, 0.0, float("nan")
+        return False, False, 0.0
     trend = last / prev - 1.0
+
+    # Short-term momentum alignment: recent move must oppose trend.
+    mom_base = float(closes[idx - LB_MOM])
+    if mom_base <= 0:
+        return False, False, 0.0
+    mom = last / mom_base - 1.0
 
     zv = _z_at(closes, idx, Z_LB)
 
@@ -92,28 +100,27 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float, fl
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    long_pullback = (
+    osc_long = (
         (zv < -Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
         or (not np.isnan(wr_val) and wr_val < WR_LOW)
     )
-    short_pullback = (
+    osc_short = (
         (zv > Z_ENTRY)
         or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
         or (not np.isnan(wr_val) and wr_val > WR_HIGH)
     )
-    return long_pullback, short_pullback, trend, zv
+    long_pullback = osc_long and mom < -MOM_MIN
+    short_pullback = osc_short and mom > MOM_MIN
+    return long_pullback, short_pullback, trend
 
 
 def _pullback_signal(pair: pd.DataFrame) -> int:
-    lp1, sp1, tr1, z1 = _pullback_at(pair, 1)
-    lp2, sp2, _, z2 = _pullback_at(pair, 2)
-    if np.isnan(z1) or np.isnan(z2):
-        return 0
-    # Exhaustion: current bar less extreme than prior bar (pullback reversing).
-    if tr1 > 0 and lp1 and lp2 and z1 > z2:
+    lp1, sp1, tr1 = _pullback_at(pair, 1)
+    lp2, sp2, _ = _pullback_at(pair, 2)
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if tr1 < 0 and sp1 and sp2 and z1 < z2:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
