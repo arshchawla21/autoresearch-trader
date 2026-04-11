@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v65-v61-osc-vote
-===========================
-Hypothesis: v61 uses OR across z/RSI/WR (any single oscillator extreme
-fires). Require instead 2-of-3 oscillators to agree — stricter
-consensus filters out single-indicator noise and should lift win rate.
+train.py — v66-v61-adaptive-minmove
+===================================
+Hypothesis: v61 uses fixed MIN_MOVE=5bps in xasset confirm regardless
+of vol regime. In high-vol regimes 5bps is noise; in dead markets it's
+never reached. Scale MIN_MOVE by ATR ratio (same mechanism as adaptive
+Z). Should keep xasset confirm informative across vol regimes.
 """
 
 from __future__ import annotations
@@ -34,7 +35,9 @@ WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
 LB_SHORT = 4
-MIN_MOVE = 0.0005
+MIN_MOVE_BASE = 0.0005
+MIN_MOVE_MIN = 0.0003
+MIN_MOVE_MAX = 0.0010
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -76,18 +79,25 @@ def _atr_series(pair: pd.DataFrame, n: int) -> np.ndarray:
     return atr
 
 
-def _adaptive_z(pair: pd.DataFrame) -> float:
+def _vol_ratio(pair: pd.DataFrame) -> float:
     atr_ser = _atr_series(pair, ATR_LB)
     if len(atr_ser) < ATR_MED_LB:
-        return Z_ENTRY_BASE
+        return 1.0
     cur = float(atr_ser[-1])
     med = float(np.median(atr_ser[-ATR_MED_LB:]))
     if med <= 0:
-        return Z_ENTRY_BASE
-    ratio = cur / med
-    # ratio 1.0 -> base; higher vol -> stricter
+        return 1.0
+    return cur / med
+
+
+def _adaptive_z(ratio: float) -> float:
     z = Z_ENTRY_BASE * ratio
     return max(Z_ENTRY_MIN, min(Z_ENTRY_MAX, z))
+
+
+def _adaptive_minmove(ratio: float) -> float:
+    mm = MIN_MOVE_BASE * ratio
+    return max(MIN_MOVE_MIN, min(MIN_MOVE_MAX, mm))
 
 
 def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool, bool, float]:
@@ -120,14 +130,16 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    z_long = zv < -z_entry
-    z_short = zv > z_entry
-    rsi_long = (not np.isnan(rsi_val)) and rsi_val < RSI_LOW
-    rsi_short = (not np.isnan(rsi_val)) and rsi_val > RSI_HIGH
-    wr_long = (not np.isnan(wr_val)) and wr_val < WR_LOW
-    wr_short = (not np.isnan(wr_val)) and wr_val > WR_HIGH
-    long_pullback = (int(z_long) + int(rsi_long) + int(wr_long)) >= 2
-    short_pullback = (int(z_short) + int(rsi_short) + int(wr_short)) >= 2
+    long_pullback = (
+        (zv < -z_entry)
+        or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
+        or (not np.isnan(wr_val) and wr_val < WR_LOW)
+    )
+    short_pullback = (
+        (zv > z_entry)
+        or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
+        or (not np.isnan(wr_val) and wr_val > WR_HIGH)
+    )
     return long_pullback, short_pullback, trend
 
 
@@ -153,7 +165,7 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
     return float(tr[-n:].mean()) / PIP
 
 
-def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
+def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool, mm: float) -> bool:
     if len(pair) < LB_SHORT + 1:
         return False
     ts_now = pair.index[-1]
@@ -181,19 +193,19 @@ def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> b
     nr = _r(prices.get("^N225"))
 
     if want_long:
-        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
+        if not np.isnan(gr) and jr < -mm and gr < -mm:
             return True
-        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
+        if not np.isnan(dr) and jr < -mm and dr > mm:
             return True
-        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
+        if not np.isnan(nr) and jr < -mm and nr > mm:
             return True
         return False
     else:
-        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
+        if not np.isnan(gr) and jr > mm and gr > mm:
             return True
-        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
+        if not np.isnan(dr) and jr > mm and dr < -mm:
             return True
-        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
+        if not np.isnan(nr) and jr > mm and nr < -mm:
             return True
         return False
 
@@ -215,11 +227,13 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         if cur_atr > thresh:
             return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    z_entry = _adaptive_z(pair)
+    ratio = _vol_ratio(pair)
+    z_entry = _adaptive_z(ratio)
+    mm = _adaptive_minmove(ratio)
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+    if _crossasset_confirms(pair, prices, want_long=(s == 1), mm=mm):
         direction = s
     else:
         direction = 0
