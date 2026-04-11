@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-train.py — v81-v80-garman-klass
-===============================
-Hypothesis: v80 uses Parkinson (H/L only). Garman-Klass uses OHLC:
-sigma_GK² = 0.5*ln(H/L)² - (2*ln2 - 1)*ln(C/O)². It's ~7x more
-efficient than close-to-close and accounts for both range AND drift,
-so it should give sharper regime reads.
+train.py — v82-v80-trend48
+==========================
+Hypothesis: v80 uses 96-bar (24h) trend lookback. For 15m MR trading
+with 1.5×ATR TP, maybe a 48-bar (12h) trend is more directly
+relevant — tracks intraday regime rather than cross-session drift.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ RSI_HIGH = 68.0
 WR_LB = 14
 WR_LOW = -85.0
 WR_HIGH = -15.0
-TREND_LB = 96
+TREND_LB = 48
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 
@@ -78,17 +77,13 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
 def _parkinson_series(pair: pd.DataFrame, n: int) -> np.ndarray:
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
-    opens = pair["open"].values.astype(float)
-    closes = pair["close"].values.astype(float)
     if len(highs) < n:
         return np.array([])
     with np.errstate(invalid="ignore", divide="ignore"):
-        lr_hl = np.log(np.where((highs > 0) & (lows > 0), highs / lows, 1.0))
-        lr_co = np.log(np.where((opens > 0) & (closes > 0), closes / opens, 1.0))
-    # Garman-Klass per-bar variance estimate
-    gk = 0.5 * lr_hl ** 2 - (2.0 * np.log(2.0) - 1.0) * lr_co ** 2
-    csum = np.cumsum(np.insert(gk, 0, 0.0))
-    rolling = (csum[n:] - csum[:-n]) / n
+        lr = np.log(np.where((highs > 0) & (lows > 0), highs / lows, 1.0))
+    lr2 = lr ** 2
+    csum = np.cumsum(np.insert(lr2, 0, 0.0))
+    rolling = (csum[n:] - csum[:-n]) / (4.0 * np.log(2.0) * n)
     return np.sqrt(np.maximum(rolling, 0.0))
 
 
