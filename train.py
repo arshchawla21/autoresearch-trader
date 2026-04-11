@@ -1,43 +1,82 @@
 #!/usr/bin/env python3
 """
-train.py — v19-wick-rejection
-=============================
-Hypothesis: long-wick candles mark price rejection — a long lower wick
-means buyers defended that level; a long upper wick means sellers did.
-Fade the wick: long on bullish lower-wick rejection, short on bearish
-upper-wick rejection. Pure single-bar microstructure, no learning.
-Required: meaningful bar range (>5 pips), wick > 60% of total range.
+train.py — v20-v15-wide-tp
+==========================
+Hypothesis: v15 (v11 ∩ v4) had ~3.6% edge over the random baseline at
+TP=15/SL=10. Test whether that directionality extends to a wider target.
+Same signal, TP=20/SL=10 (2:1). Random win rate at 20/10 is ~33.3%; need
+>35.8% for positive expectancy.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
-TP_PIPS = 12.0
+TP_PIPS = 20.0
 SL_PIPS = 10.0
 
-WICK_FRAC = 0.60
-MIN_RANGE_PIPS = 5.0
+Z_LB = 20
+Z_ENTRY = 1.2
+TREND_LB = 96
+LB_SHORT = 4
+MIN_MOVE = 0.0005
+
+
+def _v11_signal(pair: pd.DataFrame) -> int:
+    if len(pair) < TREND_LB + 1:
+        return 0
+    closes = pair["close"].values.astype(float)
+    last = float(closes[-1])
+    win = closes[-Z_LB:]
+    sd = float(win.std(ddof=1))
+    if sd <= 0:
+        return 0
+    z = (last - float(win.mean())) / sd
+    prev = float(closes[-1 - TREND_LB])
+    if prev <= 0:
+        return 0
+    trend = last / prev - 1.0
+    if trend > 0 and z < -Z_ENTRY:
+        return 1
+    if trend < 0 and z > Z_ENTRY:
+        return -1
+    return 0
+
+
+def _v4_signal(pair: pd.DataFrame, gold: pd.DataFrame | None) -> int:
+    if gold is None or len(pair) < LB_SHORT + 1:
+        return 0
+    pc = pair["close"]
+    p_now = float(pc.iloc[-1])
+    p_prev = float(pc.iloc[-1 - LB_SHORT])
+    if p_prev <= 0:
+        return 0
+    gc = gold["close"]
+    try:
+        g_now = float(gc.asof(pair.index[-1]))
+        g_prev = float(gc.asof(pair.index[-1 - LB_SHORT]))
+    except Exception:
+        return 0
+    if np.isnan(g_now) or np.isnan(g_prev) or g_prev <= 0:
+        return 0
+    jr = np.log(p_now / p_prev)
+    gr = np.log(g_now / g_prev)
+    if jr > MIN_MOVE and gr > MIN_MOVE:
+        return -1
+    if jr < -MIN_MOVE and gr < -MIN_MOVE:
+        return 1
+    return 0
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < 2:
+    if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    bar = pair.iloc[-1]
-    o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
-    rng = h - l
-    if rng < MIN_RANGE_PIPS * 0.01:  # 0.05 yen = 5 pips
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    body_top = max(o, c)
-    body_bot = min(o, c)
-    upper_wick = h - body_top
-    lower_wick = body_bot - l
-
-    if lower_wick / rng >= WICK_FRAC:
-        direction = 1
-    elif upper_wick / rng >= WICK_FRAC:
-        direction = -1
-    else:
+    s11 = _v11_signal(pair)
+    s4 = _v4_signal(pair, prices.get("GC=F"))
+    if s11 == 0 or s4 == 0 or s11 != s4:
         direction = 0
+    else:
+        direction = s11
     return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
