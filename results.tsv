@@ -54,3 +54,4 @@ apr12b	v36_tnx_gate	-3.4496	0.000920	-1.3371	0.0789	-0.011661	0.4351	1.0097	262	
 apr12b	squeeze_breakout	-5.7095	-0.056662	-3.4101	-0.9656	-0.058684	0.3694	0.7668	563	Squeeze expansion breakout - below random 36.94pct breakouts fail flip next	2026-04-12T23:20:00
 apr12b	squeeze_fade	-2.9822	-0.011586	-1.8289	-0.4314	-0.026859	0.4199	0.9538	612	Fade squeeze breakouts - 41.99pct still below random 43.2pct no edge in squeeze family	2026-04-12T23:40:00
 apr12b	v36_wick_confirm	-3.7861	0.006951	-1.1456	1.1695	-0.005944	0.4610	1.1194	154	v36 + rejection wick ge 40pct of bar range - win record 46.1pct but only 154 trades 0.7/day	2026-04-12T23:50:00
+apr12b	v36_gold_corr_gate	-6.1661	0.003986	-1.0831	0.5214	-0.007645	0.4746	1.1845	59	v36 + JPY-gold corr>0 regime - win record 47.46pct but gate too strict 0.3 trades/day	2026-04-13T00:10:00

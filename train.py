@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-train.py — v41-v36-wick-confirm
-===============================
-Hypothesis: v36 champion (vol-filtered v24) is the best so far at
-+1.13%/44.81% win. The pullback oscillators look at closes only. A
-rejection wick on the entry bar (price pierced lower but closed near
-high) is a real-time confirmation that the dip was bought. Require a
-lower wick ≥ 40% of bar range for longs and upper wick ≥ 40% for shorts.
-Novel structural filter from intrabar shape, additive to v36.
+train.py — v42-v36-gold-corr-regime
+===================================
+Hypothesis: v24's cross-asset confirm relies on gold as one of three
+signals. That only works when JPY-gold are in their usual safe-haven
+co-move regime. Compute rolling 100-bar correlation of JPY vs gold
+returns. Only enable v36 trades when corr > 0 (classical risk-off
+regime). When correlation is negative, the assets have decoupled and
+the xasset confirm is unreliable → skip. Novel regime gate.
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
-WICK_FRAC = 0.40
+CORR_LB = 100
+CORR_MIN = 0.0
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -105,19 +106,28 @@ def _vol_ok(pair: pd.DataFrame) -> bool:
     return last > med
 
 
-def _wick_ok(pair: pd.DataFrame, direction: int) -> bool:
-    row = pair.iloc[-1]
-    o = float(row["open"]); h = float(row["high"]); l = float(row["low"]); c = float(row["close"])
-    rng = h - l
-    if rng <= 0:
-        return False
-    lower_wick = min(o, c) - l
-    upper_wick = h - max(o, c)
-    if direction == 1:
-        return lower_wick / rng >= WICK_FRAC
-    if direction == -1:
-        return upper_wick / rng >= WICK_FRAC
-    return False
+def _corr_ok(pair: pd.DataFrame, prices: dict) -> bool:
+    gold = prices.get("GC=F")
+    if gold is None or len(pair) < CORR_LB + 2:
+        return True
+    try:
+        g_aligned = gold["close"].reindex(pair.index[-CORR_LB - 1:], method="ffill").astype(float)
+    except Exception:
+        return True
+    p_tail = pair["close"].iloc[-CORR_LB - 1:].astype(float)
+    p_ret = np.diff(np.log(p_tail.values))
+    g_vals = g_aligned.values
+    if np.any(g_vals <= 0) or np.any(np.isnan(g_vals)):
+        return True
+    g_ret = np.diff(np.log(g_vals))
+    if len(p_ret) != len(g_ret) or len(p_ret) < 20:
+        return True
+    sd_p = p_ret.std()
+    sd_g = g_ret.std()
+    if sd_p <= 0 or sd_g <= 0:
+        return True
+    corr = float(np.mean((p_ret - p_ret.mean()) * (g_ret - g_ret.mean())) / (sd_p * sd_g))
+    return corr > CORR_MIN
 
 
 def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
@@ -174,7 +184,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     if not _vol_ok(pair):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if not _wick_ok(pair, s):
+    if not _corr_ok(pair, prices):
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
