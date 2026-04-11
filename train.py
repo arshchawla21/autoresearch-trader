@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v33-v24-liquid-hours
-===============================
-Hypothesis: v32 showed London hours lift v24 win rate from 43.96% to
-44.56% but halve trade count. Extend the window to 07-21 UTC (full
-Europe + NY overlap) to retain the liquidity-driven quality lift while
-getting ~2x more trades than London-only.
+train.py — v34-session-asymmetric
+=================================
+Hypothesis: In Tokyo hours USD/JPY leads its cross-asset peers (BoJ/domestic
+flow driven) so fading against the move makes no sense — ride the 1-hour
+momentum instead. In London hours DXY leads and USD/JPY lags, so v24's
+pullback + cross-asset confirm structure is the correct model. Stack two
+different sub-strategies per session. Outside those windows, flat.
 """
 
 from __future__ import annotations
@@ -27,8 +28,10 @@ WR_HIGH = -15.0
 TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
+TOKYO_MOMO_THRESH = 0.0010  # 10 bps 1h move to trigger
 
-SESSION_HOURS = set(range(7, 21))  # 07-20 UTC inclusive
+LONDON_HOURS = set(range(7, 16))
+TOKYO_HOURS = set(range(0, 6))
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -59,7 +62,7 @@ def _williams_r(pair: pd.DataFrame, n: int) -> float:
     return -100.0 * (hi - c) / (hi - lo)
 
 
-def _pullback_signal(pair: pd.DataFrame) -> int:
+def _v24_london(pair: pd.DataFrame, prices: dict) -> int:
     closes = pair["close"].values.astype(float)
     if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + 1:
         return 0
@@ -75,83 +78,87 @@ def _pullback_signal(pair: pd.DataFrame) -> int:
     rsi = _rsi(closes, RSI_LB)
     wr = _williams_r(pair, WR_LB)
 
-    long_pullback = (
+    long_pull = (
         (z < -Z_ENTRY)
         or (not np.isnan(rsi) and rsi < RSI_LOW)
         or (not np.isnan(wr) and wr < WR_LOW)
     )
-    short_pullback = (
+    short_pull = (
         (z > Z_ENTRY)
         or (not np.isnan(rsi) and rsi > RSI_HIGH)
         or (not np.isnan(wr) and wr > WR_HIGH)
     )
+    s = 0
+    if trend > 0 and long_pull:
+        s = 1
+    elif trend < 0 and short_pull:
+        s = -1
+    if s == 0:
+        return 0
 
-    if trend > 0 and long_pullback:
-        return 1
-    if trend < 0 and short_pullback:
-        return -1
-    return 0
-
-
-def _ret(s: pd.Series, ts_now, ts_prev) -> float:
-    try:
-        a = float(s.asof(ts_now))
-        b = float(s.asof(ts_prev))
-    except Exception:
-        return float("nan")
-    if np.isnan(a) or np.isnan(b) or b <= 0:
-        return float("nan")
-    return float(np.log(a / b))
-
-
-def _crossasset_confirms(pair: pd.DataFrame, prices: dict, want_long: bool) -> bool:
-    if len(pair) < LB_SHORT + 1:
-        return False
+    # cross-asset confirm
     ts_now = pair.index[-1]
     ts_prev = pair.index[-1 - LB_SHORT]
-    p_now = float(pair["close"].iloc[-1])
-    p_prev = float(pair["close"].iloc[-1 - LB_SHORT])
-    if p_prev <= 0:
-        return False
-    jr = float(np.log(p_now / p_prev))
+    jr = float(np.log(last / float(closes[-1 - LB_SHORT])))
 
-    gold = prices.get("GC=F")
-    dxy = prices.get("DX-Y.NYB")
-    nk = prices.get("^N225")
+    def _r(other):
+        if other is None:
+            return float("nan")
+        try:
+            a = float(other["close"].asof(ts_now))
+            b = float(other["close"].asof(ts_prev))
+        except Exception:
+            return float("nan")
+        if np.isnan(a) or np.isnan(b) or b <= 0:
+            return float("nan")
+        return float(np.log(a / b))
 
-    gr = _ret(gold["close"], ts_now, ts_prev) if gold is not None else float("nan")
-    dr = _ret(dxy["close"], ts_now, ts_prev) if dxy is not None else float("nan")
-    nr = _ret(nk["close"], ts_now, ts_prev) if nk is not None else float("nan")
+    gr = _r(prices.get("GC=F"))
+    dr = _r(prices.get("DX-Y.NYB"))
+    nr = _r(prices.get("^N225"))
 
-    if want_long:
-        if not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE:
-            return True
-        return False
+    if s == 1:
+        ok = (
+            (not np.isnan(gr) and jr < -MIN_MOVE and gr < -MIN_MOVE)
+            or (not np.isnan(dr) and jr < -MIN_MOVE and dr > MIN_MOVE)
+            or (not np.isnan(nr) and jr < -MIN_MOVE and nr > MIN_MOVE)
+        )
     else:
-        if not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE:
-            return True
-        if not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE:
-            return True
-        if not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE:
-            return True
-        return False
+        ok = (
+            (not np.isnan(gr) and jr > MIN_MOVE and gr > MIN_MOVE)
+            or (not np.isnan(dr) and jr > MIN_MOVE and dr < -MIN_MOVE)
+            or (not np.isnan(nr) and jr > MIN_MOVE and nr < -MIN_MOVE)
+        )
+    return s if ok else 0
+
+
+def _tokyo_momo(pair: pd.DataFrame) -> int:
+    """Ride 1h (4-bar) JPY momentum in Tokyo — JPY leads here."""
+    closes = pair["close"].values.astype(float)
+    if len(closes) < LB_SHORT + 1:
+        return 0
+    last = float(closes[-1])
+    prev = float(closes[-1 - LB_SHORT])
+    if prev <= 0:
+        return 0
+    r = np.log(last / prev)
+    if r > TOKYO_MOMO_THRESH:
+        return 1
+    if r < -TOKYO_MOMO_THRESH:
+        return -1
+    return 0
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
     if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if pair.index[-1].hour not in SESSION_HOURS:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    s = _pullback_signal(pair)
-    if s == 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
-        direction = s
-    else:
-        direction = 0
-    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    h = pair.index[-1].hour
+
+    if h in LONDON_HOURS:
+        d = _v24_london(pair, prices)
+        return {"direction": d, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    if h in TOKYO_HOURS:
+        d = _tokyo_momo(pair)
+        return {"direction": d, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
