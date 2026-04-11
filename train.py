@@ -1,62 +1,54 @@
 #!/usr/bin/env python3
 """
-train.py — Strategy v6: VIX-Gated Mean Reversion
-==================================================
-Hypothesis: v4 (z-score MR) worked at Sharpe 4.84. Mean reversion is known
-to break down during risk-off shocks where trends run further than normal.
-Gate the z-score fade by VIX regime: only take MR trades when VIX is below
-its own rolling median (calm regime). When VIX is elevated, stay flat —
-don't catch falling knives.
+train.py — Strategy v7: EMA Trend-Follow
+==========================================
+Hypothesis: if mean reversion is the right frame for USD/JPY 15m, a pure
+trend-follow strategy should fail symmetrically. Test: fast EMA(8) crosses
+above slow EMA(21) → long, reverse → short. This is a classic trend
+signal. If it loses, it reinforces that the pair's 15m structure favours
+fading extremes.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-Z_LOOKBACK = 20
-Z_ENTRY = 1.5
-VIX_LOOKBACK = 96          # ~1 day of 15m bars of VIX
-VIX_PCTL = 0.60            # only trade when VIX is below 60th pct of its day
+FAST = 8
+SLOW = 21
+
+
+def _ema(x: np.ndarray, n: int) -> float:
+    alpha = 2.0 / (n + 1)
+    e = float(x[0])
+    for v in x[1:]:
+        e = alpha * float(v) + (1 - alpha) * e
+    return e
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < Z_LOOKBACK + 1:
+    if pair is None or len(pair) < SLOW + 2:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    closes = pair["close"].dropna()
-    if len(closes) < Z_LOOKBACK + 1:
+    closes = pair["close"].dropna().values
+    if len(closes) < SLOW + 2:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    window = closes.iloc[-Z_LOOKBACK:]
-    mu = float(window.mean())
-    sd = float(window.std(ddof=1))
-    if sd <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-    z = (float(closes.iloc[-1]) - mu) / sd
+    fast_now = _ema(closes[-FAST:], FAST)
+    slow_now = _ema(closes[-SLOW:], SLOW)
+    fast_prev = _ema(closes[-FAST - 1:-1], FAST)
+    slow_prev = _ema(closes[-SLOW - 1:-1], SLOW)
 
-    # VIX regime gate
-    vix = prices.get("^VIX")
-    calm_regime = True
-    if vix is not None and len(vix) >= VIX_LOOKBACK:
-        vix_closes = vix["close"].dropna()
-        if len(vix_closes) >= VIX_LOOKBACK:
-            recent_vix = float(vix_closes.iloc[-1])
-            vix_window = vix_closes.iloc[-VIX_LOOKBACK:]
-            pctl_threshold = float(vix_window.quantile(VIX_PCTL))
-            calm_regime = recent_vix <= pctl_threshold
-
-    if not calm_regime:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    if z > Z_ENTRY:
-        direction = -1
-    elif z < -Z_ENTRY:
+    # Current state + cross detection
+    if fast_now > slow_now and fast_prev <= slow_prev:
         direction = 1
+    elif fast_now < slow_now and fast_prev >= slow_prev:
+        direction = -1
     else:
         direction = 0
 

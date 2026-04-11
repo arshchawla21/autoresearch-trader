@@ -5,3 +5,4 @@ apr12	tnx_yield_momentum	-2.3495	-0.002524	-3.0057	-0.1688	-0.014950	0.3926	0.96
 apr12	zscore_mean_reversion	4.8372	0.013706	5.7710	2.3460	-0.005842	0.4692	1.3153	130	Fade 20-bar z-score extremes (1.5 sigma)	2026-04-12T00:15:00
 apr12	rsi_bb_double_confirm	6.8620	0.011654	4.8817	3.1957	-0.003647	0.5682	1.9720	44	RSI+BB stacked confirmation - too few trades (2.9/day) despite high sharpe	2026-04-12T00:20:00
 apr12	vix_gated_mr	6.5790	0.015014	6.1591	3.9911	-0.003762	0.5181	1.5940	83	Z-score MR gated to VIX<60th pct (calm regime)	2026-04-12T00:25:00
+apr12	ema_trend_follow_control	-9.4957	-0.011273	-8.4524	-0.7447	-0.015138	0.2985	0.6165	67	EMA 8/21 cross TF (control test - confirms MR edge)	2026-04-12T00:30:00
