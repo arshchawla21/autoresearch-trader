@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v58-v47-mom-align
-============================
-Hypothesis: v47 uses z/RSI/WR to detect "extreme" pullbacks but doesn't
-check the magnitude of the pullback against the trend. Add explicit
-short-term momentum alignment: the 8-bar (2h) return must be opposite
-to trend by at least MIN_MOVE. This makes the pullback a real
-countermove, not just an oscillator quirk.
+train.py — v59-v47-adaptive-z
+=============================
+Hypothesis: v47 uses fixed Z_ENTRY=1.2. In dead markets a z of 1.2 is
+rare and trades are missed; in volatile regimes a z of 1.2 is noise.
+Scale Z_ENTRY by current ATR vs 200-bar median ATR so threshold tightens
+in turbulence and loosens in calm markets. Keeps win quality consistent
+across regimes.
 """
 
 from __future__ import annotations
@@ -20,9 +20,12 @@ SL_BASE = 10.0
 TP_MIN, TP_MAX = 8.0, 25.0
 SL_MIN, SL_MAX = 6.0, 18.0
 ATR_LB = 20
+ATR_MED_LB = 200
 
 Z_LB = 20
-Z_ENTRY = 1.2
+Z_ENTRY_BASE = 1.2
+Z_ENTRY_MIN = 0.9
+Z_ENTRY_MAX = 1.8
 RSI_LB = 14
 RSI_LOW = 32.0
 RSI_HIGH = 68.0
@@ -31,9 +34,7 @@ WR_LOW = -85.0
 WR_HIGH = -15.0
 TREND_LB = 96
 LB_SHORT = 4
-LB_MOM = 8
 MIN_MOVE = 0.0005
-MOM_MIN = 0.0008
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -52,26 +53,49 @@ def _rsi(closes: np.ndarray, n: int) -> float:
     return float(100.0 - 100.0 / (1.0 + rs))
 
 
-def _z_at(closes: np.ndarray, idx: int, n: int) -> float:
-    if idx == -1:
-        win = closes[-n:]
-    else:
-        win = closes[idx - n + 1 : idx + 1]
-    if len(win) < n:
-        return float("nan")
-    sd = float(win.std(ddof=1))
-    if sd <= 0:
-        return 0.0
-    return float((closes[idx] - float(win.mean())) / sd)
+def _true_range(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> np.ndarray:
+    return np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(
+            np.abs(highs[1:] - closes[:-1]),
+            np.abs(lows[1:] - closes[:-1]),
+        ),
+    )
 
 
-def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
-    """Return (long_pullback, short_pullback, trend) at bar -offset."""
+def _atr_series(pair: pd.DataFrame, n: int) -> np.ndarray:
+    highs = pair["high"].values.astype(float)
+    lows = pair["low"].values.astype(float)
+    closes = pair["close"].values.astype(float)
+    tr = _true_range(highs, lows, closes)
+    if len(tr) < n:
+        return np.array([])
+    # rolling mean
+    csum = np.cumsum(np.insert(tr, 0, 0.0))
+    atr = (csum[n:] - csum[:-n]) / n
+    return atr
+
+
+def _adaptive_z(pair: pd.DataFrame) -> float:
+    atr_ser = _atr_series(pair, ATR_LB)
+    if len(atr_ser) < ATR_MED_LB:
+        return Z_ENTRY_BASE
+    cur = float(atr_ser[-1])
+    med = float(np.median(atr_ser[-ATR_MED_LB:]))
+    if med <= 0:
+        return Z_ENTRY_BASE
+    ratio = cur / med
+    # ratio 1.0 -> base; higher vol -> stricter
+    z = Z_ENTRY_BASE * ratio
+    return max(Z_ENTRY_MIN, min(Z_ENTRY_MAX, z))
+
+
+def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool, bool, float]:
     closes = pair["close"].values.astype(float)
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     idx = -offset
-    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB, LB_MOM + 1) + offset + 1:
+    if len(closes) < max(Z_LB, RSI_LB + 1, WR_LB, TREND_LB) + offset + 1:
         return False, False, 0.0
     last = float(closes[idx])
     prev = float(closes[idx - TREND_LB])
@@ -79,13 +103,9 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
         return False, False, 0.0
     trend = last / prev - 1.0
 
-    # Short-term momentum alignment: recent move must oppose trend.
-    mom_base = float(closes[idx - LB_MOM])
-    if mom_base <= 0:
-        return False, False, 0.0
-    mom = last / mom_base - 1.0
-
-    zv = _z_at(closes, idx, Z_LB)
+    win = closes[idx - Z_LB + 1 : idx + 1] if idx != -1 else closes[-Z_LB:]
+    sd = float(win.std(ddof=1))
+    zv = (last - float(win.mean())) / sd if sd > 0 else 0.0
 
     rsi_slice = closes[: idx + 1] if idx != -1 else closes
     rsi_val = _rsi(rsi_slice, RSI_LB)
@@ -100,24 +120,22 @@ def _pullback_at(pair: pd.DataFrame, offset: int) -> tuple[bool, bool, float]:
         c = float(closes[idx])
     wr_val = -100.0 * (hi - c) / (hi - lo) if hi - lo > 0 else float("nan")
 
-    osc_long = (
-        (zv < -Z_ENTRY)
+    long_pullback = (
+        (zv < -z_entry)
         or (not np.isnan(rsi_val) and rsi_val < RSI_LOW)
         or (not np.isnan(wr_val) and wr_val < WR_LOW)
     )
-    osc_short = (
-        (zv > Z_ENTRY)
+    short_pullback = (
+        (zv > z_entry)
         or (not np.isnan(rsi_val) and rsi_val > RSI_HIGH)
         or (not np.isnan(wr_val) and wr_val > WR_HIGH)
     )
-    long_pullback = osc_long and mom < -MOM_MIN
-    short_pullback = osc_short and mom > MOM_MIN
     return long_pullback, short_pullback, trend
 
 
-def _pullback_signal(pair: pd.DataFrame) -> int:
-    lp1, sp1, tr1 = _pullback_at(pair, 1)
-    lp2, sp2, _ = _pullback_at(pair, 2)
+def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
+    lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
+    lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
     if tr1 > 0 and lp1 and lp2:
         return 1
     if tr1 < 0 and sp1 and sp2:
@@ -131,13 +149,7 @@ def _atr_pips(pair: pd.DataFrame, n: int) -> float:
     highs = pair["high"].values.astype(float)
     lows = pair["low"].values.astype(float)
     closes = pair["close"].values.astype(float)
-    tr = np.maximum(
-        highs[1:] - lows[1:],
-        np.maximum(
-            np.abs(highs[1:] - closes[:-1]),
-            np.abs(lows[1:] - closes[:-1]),
-        ),
-    )
+    tr = _true_range(highs, lows, closes)
     if len(tr) < n:
         return TP_BASE
     return float(tr[-n:].mean()) / PIP
@@ -197,7 +209,8 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    s = _pullback_signal(pair)
+    z_entry = _adaptive_z(pair)
+    s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
