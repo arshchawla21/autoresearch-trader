@@ -83,3 +83,4 @@ apr12b	v61_multi_trend	-1.5559	0.021611	-0.7211	1.7849	-0.012108	0.4833	1.1772	3
 apr12b	v61_spy_xasset	-1.9968	0.014158	-0.9504	0.7873	-0.017984	0.4683	1.1040	363	v61 + swap gold for SPY in xasset - SPY worse than gold as USDJPY anchor	2026-04-13T07:40:00
 apr12b	v61_tight_brackets	-0.6968	0.033442	-0.3606	3.4871	-0.009590	0.4881	1.2202	420	NEW CHAMPION v61 + TP_MIN=6 SL_MIN=4 TP_MAX=20 SL_MAX=14 - tighter brackets Sharpe -0.70 return +3.34pct win 48.81	2026-04-13T07:55:00
 apr12b	v69_fast_atr	-0.7828	0.031592	-0.4149	3.0436	-0.010380	0.4866	1.2041	409	v69 + 10-bar ATR for brackets - adds variance hurts marginally	2026-04-13T08:10:00
+apr12b	v69_tp_cap15	-1.2459	0.026009	-0.6346	3.0806	-0.008443	0.4801	1.1833	427	v69 + cap TP_MAX=15 SL_MAX=10 - smaller wins drag down avg PnL worse than v69	2026-04-13T08:25:00

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v70-v69-fast-atr
+train.py — v71-v69-tp-cap15
 ===========================
-Hypothesis: v69 uses 20-bar ATR for both sizing and regime. Switch
-bracket sizing to a 10-bar ATR — more reactive to current conditions
-so each trade's bracket fits the vol at entry, not the 5-hour average.
-Regime filter stays on 20-bar ATR for stability.
+Hypothesis: v69 allows TP up to 20 pips (and SL up to 14). The larger
+brackets are where MTM variance comes from. Cap TP_MAX at 15 and
+SL_MAX at 10 — the same bracket family as the original baseline.
+Small-regime trades keep their tight brackets.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import pandas as pd
 PIP = 0.01
 TP_BASE = 15.0
 SL_BASE = 10.0
-TP_MIN, TP_MAX = 6.0, 20.0
-SL_MIN, SL_MAX = 4.0, 14.0
+TP_MIN, TP_MAX = 6.0, 15.0
+SL_MIN, SL_MAX = 4.0, 10.0
 ATR_LB = 20
 ATR_LB_FAST = 10
 ATR_MED_LB = 200
@@ -206,7 +206,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if pair is None:
         return {"direction": 0, "tp_pips": TP_BASE, "sl_pips": SL_BASE}
 
-    atr = _atr_pips(pair, ATR_LB_FAST)
+    atr = _atr_pips(pair, ATR_LB)
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
