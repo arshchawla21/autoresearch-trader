@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v94-swing-1bar
-==========================
-Hypothesis: v92 swing AND xasset was genuinely high quality (51.5%
-win, PF 1.40, MaxDD -0.46%) but too few trades (0.6/day). Relax
-pullback persistence from 2 bars to 1 bar. That should ~2× entries
-while keeping the AND quality stack intact.
+train.py — v95-pin-bar
+=======================
+Hypothesis: v92 swing confirm works because it detects rejection.
+Cleaner signal: pin-bar shape. For long, last bar's lower wick
+> 50% of range (sellers rejected). For short, upper wick > 50%.
+Replaces swing HL/LH with a bar-shape filter alongside 2-bar
+pullback + xasset AND stack.
 """
 
 from __future__ import annotations
@@ -146,9 +147,10 @@ def _pullback_at(pair: pd.DataFrame, offset: int, z_entry: float) -> tuple[bool,
 
 def _pullback_signal(pair: pd.DataFrame, z_entry: float) -> int:
     lp1, sp1, tr1 = _pullback_at(pair, 1, z_entry)
-    if tr1 > 0 and lp1:
+    lp2, sp2, _ = _pullback_at(pair, 2, z_entry)
+    if tr1 > 0 and lp1 and lp2:
         return 1
-    if tr1 < 0 and sp1:
+    if tr1 < 0 and sp1 and sp2:
         return -1
     return 0
 
@@ -226,16 +228,20 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
-    # Swing-reversal AND xasset-confirm
-    if len(pair) >= 2:
-        low1 = float(pair["low"].iloc[-1])
-        low2 = float(pair["low"].iloc[-2])
-        hi1 = float(pair["high"].iloc[-1])
-        hi2 = float(pair["high"].iloc[-2])
-        if s == 1 and not (low1 > low2):
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-        if s == -1 and not (hi1 < hi2):
-            return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    # Pin-bar confirm: long needs lower wick > 50% of range, short upper wick
+    o = float(pair["open"].iloc[-1])
+    c = float(pair["close"].iloc[-1])
+    h = float(pair["high"].iloc[-1])
+    l = float(pair["low"].iloc[-1])
+    rng = h - l
+    if rng <= 0:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    lower_wick = min(o, c) - l
+    upper_wick = h - max(o, c)
+    if s == 1 and lower_wick / rng < 0.5:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
+    if s == -1 and upper_wick / rng < 0.5:
+        return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     if _crossasset_confirms(pair, prices, want_long=(s == 1)):
         direction = s
