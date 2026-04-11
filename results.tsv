@@ -23,3 +23,4 @@ apr12b	nikkei_lead_tokyo	-6.2483	-0.105178	-4.9834	-0.9640	-0.109110	0.3697	0.77
 apr12b	zscore_mr_control	-4.6139	-0.119739	-5.2669	-0.8530	-0.140378	0.3996	0.8722	2345	Pure 20-bar z-score MR - 40% win rate = random path baseline. apr12 MR edge falsified.	2026-04-12T13:00:00
 apr12b	london_orb	-3.9810	-0.012001	-1.8011	-0.6578	-0.018246	0.4109	0.9170	348	Breakout of 03-07 UTC range during 07-10 UTC window - at random baseline 41%	2026-04-12T13:20:00
 apr12b	histgbm_longh	-7.3186	-0.274047	-11.4906	-0.9714	-0.282107	0.3862	0.8270	4270	HistGBM on 11 long-horizon features predicting 24h dir - classic warmup overfit	2026-04-12T14:00:00
+apr12b	trend_aligned_mr	-2.4518	-0.014904	-1.8602	-0.5288	-0.028183	0.4230	0.9616	941	Buy dips in 24h uptrend / sell rips in downtrend - 42.3% win rate best yet, nearly flat	2026-04-12T14:20:00
