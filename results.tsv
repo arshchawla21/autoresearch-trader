@@ -11,3 +11,4 @@ apr12	logistic_direction_ml	-0.7212	0.002523	-0.1821	1.4059	-0.001794	0.5455	1.8
 apr12	atr_adaptive_mr	3.2218	0.009837	3.4481	1.5105	-0.006512	0.4902	1.2076	153	Z-score MR with ATR-scaled TP/SL - more trades/higher hit rate but lower sharpe	2026-04-12T00:45:00
 apr12	histgbm_direction_ml	-5.9759	-0.013925	-8.7635	-0.6692	-0.020807	0.3578	0.8405	218	HistGradientBoosting on 13 features - warmup overfits to regime that does not generalize	2026-04-12T00:55:00
 apr12	session_filtered_mr	4.8632	0.011022	4.3618	2.9297	-0.003762	0.4933	1.4603	75	Z-score MR restricted to 00-13 UTC (Tokyo+early London)	2026-04-12T01:00:00
+apr12	stop_run_reversal	-1.8171	-0.000021	-1.8058	-0.0041	-0.005035	0.4079	1.0001	76	Fade failed breakouts of 12-bar high/low (wick reversal pattern)	2026-04-12T01:05:00
