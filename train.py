@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — Strategy v13: Stop-Run Reversal
-============================================
-Hypothesis: when a 15m bar pokes a new N-bar high/low AND closes back
-inside the prior range, that's a "stop run" — the market ran stops above
-a swing level and reversed. This signature is distinct from pure z-score
-MR: it requires a specific candle shape (wick out, close back in). If the
-edge is real, fading these bars should pay consistently.
+train.py — Strategy v14: Triple-Signal Mean-Reversion Ensemble
+================================================================
+Hypothesis: the three winning MR variants (v4 pure z-score, v6 VIX-gated,
+v12 session-filtered) all fire on overlapping but distinct subsets of
+bars. A majority vote (≥ 2 of 3 agree) should concentrate trades on the
+*intersection* of their edges and lift hit rate without overfitting any
+single filter. This is a structural ensemble, not a hyperparameter tune.
 """
 
 from __future__ import annotations
@@ -17,43 +17,75 @@ import pandas as pd
 TP_PIPS = 15.0
 SL_PIPS = 10.0
 
-LOOKBACK = 12      # 3 hours of 15m bars to define the range
-WICK_RATIO = 0.4   # min fraction of bar range that is wick on the breakout side
+Z_LOOKBACK = 20
+Z_ENTRY = 1.5
+
+VIX_LOOKBACK = 96
+VIX_PCTL = 0.60
+
+ALLOWED_UTC_HOURS = set(range(0, 13))
+
+
+def _zscore_signal(pair: pd.DataFrame) -> int:
+    closes = pair["close"].dropna()
+    if len(closes) < Z_LOOKBACK + 1:
+        return 0
+    window = closes.iloc[-Z_LOOKBACK:]
+    mu = float(window.mean())
+    sd = float(window.std(ddof=1))
+    if sd <= 0:
+        return 0
+    z = (float(closes.iloc[-1]) - mu) / sd
+    if z > Z_ENTRY:
+        return -1
+    if z < -Z_ENTRY:
+        return 1
+    return 0
+
+
+def _vix_gated_signal(pair: pd.DataFrame, vix: pd.DataFrame | None) -> int:
+    base = _zscore_signal(pair)
+    if base == 0 or vix is None:
+        return 0
+    vix_closes = vix["close"].dropna()
+    if len(vix_closes) < VIX_LOOKBACK:
+        return 0
+    vix_window = vix_closes.iloc[-VIX_LOOKBACK:]
+    threshold = float(vix_window.quantile(VIX_PCTL))
+    if float(vix_closes.iloc[-1]) > threshold:
+        return 0
+    return base
+
+
+def _session_signal(pair: pd.DataFrame) -> int:
+    closes = pair["close"].dropna()
+    if len(closes) < 1:
+        return 0
+    now = closes.index[-1]
+    hour_utc = now.tz_convert("UTC").hour if now.tzinfo is not None else now.hour
+    if hour_utc not in ALLOWED_UTC_HOURS:
+        return 0
+    return _zscore_signal(pair)
 
 
 def trade(prices: dict[str, pd.DataFrame]) -> dict:
     pair = prices.get("JPY=X")
-    if pair is None or len(pair) < LOOKBACK + 2:
+    if pair is None:
         return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
 
-    df = pair.dropna(subset=["close"]).tail(LOOKBACK + 1)
-    if len(df) < LOOKBACK + 1:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    votes = [
+        _zscore_signal(pair),
+        _vix_gated_signal(pair, prices.get("^VIX")),
+        _session_signal(pair),
+    ]
+    long_votes = sum(1 for v in votes if v == 1)
+    short_votes = sum(1 for v in votes if v == -1)
 
-    prior = df.iloc[:-1]
-    curr = df.iloc[-1]
+    if long_votes >= 2 and short_votes == 0:
+        direction = 1
+    elif short_votes >= 2 and long_votes == 0:
+        direction = -1
+    else:
+        direction = 0
 
-    prior_high = float(prior["high"].max())
-    prior_low = float(prior["low"].min())
-
-    c_open = float(curr["open"])
-    c_high = float(curr["high"])
-    c_low = float(curr["low"])
-    c_close = float(curr["close"])
-    c_range = c_high - c_low
-    if c_range <= 0:
-        return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    # Bullish-break-failed: high > prior_high BUT close back below prior_high
-    if c_high > prior_high and c_close < prior_high:
-        upper_wick = c_high - max(c_open, c_close)
-        if upper_wick / c_range >= WICK_RATIO:
-            return {"direction": -1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    # Bearish-break-failed: low < prior_low BUT close back above prior_low
-    if c_low < prior_low and c_close > prior_low:
-        lower_wick = min(c_open, c_close) - c_low
-        if lower_wick / c_range >= WICK_RATIO:
-            return {"direction": 1, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
-
-    return {"direction": 0, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
+    return {"direction": direction, "tp_pips": TP_PIPS, "sl_pips": SL_PIPS}
