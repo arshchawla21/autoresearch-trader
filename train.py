@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v90-tokyo-session
-=============================
-Hypothesis: v80 champion averages outcomes across all 24h of forex
-activity. USD/JPY mean reversion is strongest during the Tokyo
-session (22–06 UTC) when liquidity is low and flow is dominated
-by JPY participants. Gate entries to that window only.
+train.py — v91-skip-ny
+=======================
+Hypothesis: v90 Tokyo-only died because low-liquidity Asian flow
+isn't actually mean-reverting. Flip: NY session (13–21 UTC) is
+when macro headlines trend USD/JPY and kill MR. Skip NY, trade
+everything else.
 """
 
 from __future__ import annotations
@@ -214,10 +214,10 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    # Tokyo session only: 22–06 UTC
+    # Skip NY session (13–21 UTC)
     ts = pair.index[-1]
     hour = ts.hour
-    if not (hour >= 22 or hour < 6):
+    if 13 <= hour < 21:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     # Parkinson vol spike skip (replaces ATR-based skip in v69)
