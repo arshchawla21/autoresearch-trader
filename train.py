@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-train.py — v52-v47-london
-=========================
-Hypothesis: London session (07-16 UTC) marginally lifted v24 family
-quality. Test whether it stacks with v47 persistent-pullback champion
-to push Sharpe above 0.
+train.py — v53-v47-weekday
+==========================
+Hypothesis: Mondays carry weekend-gap variance and Fridays see
+position-closing flows. Tue/Wed/Thu are the cleanest directional
+days. Restrict v47 to Tue-Thu only — cuts ~40% of weeks but keeps
+the clean bars.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ TREND_LB = 96
 LB_SHORT = 4
 MIN_MOVE = 0.0005
 VOL_LB = 20
-LONDON_HOURS = set(range(7, 16))
+WEEKDAYS = {1, 2, 3}  # Tue=1, Wed=2, Thu=3
 
 
 def _rsi(closes: np.ndarray, n: int) -> float:
@@ -200,7 +201,7 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     tp = max(TP_MIN, min(TP_MAX, 1.5 * atr))
     sl = max(SL_MIN, min(SL_MAX, 1.0 * atr))
 
-    if pair.index[-1].hour not in LONDON_HOURS:
+    if pair.index[-1].dayofweek not in WEEKDAYS:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
 
     s = _pullback_signal(pair)
