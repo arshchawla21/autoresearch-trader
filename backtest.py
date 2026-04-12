@@ -24,7 +24,6 @@ import numpy as np
 import pandas as pd
 
 from prepare import (
-    ALL_SYMBOLS,
     DEFAULT_SL_PIPS,
     DEFAULT_TP_PIPS,
     HISTORY_DAYS,
@@ -318,10 +317,20 @@ function addChart(title, cfg) {{
 const step = Math.max(1, Math.floor(DATA.times.length / 80));
 const sparseLabels = DATA.times.map((l, i) => (i % step === 0 ? l.slice(5, 16) : ''));
 
-const scatterLong = DATA.long_entries.map(p => ({{ x: p.time.slice(5, 16), y: p.price }}));
-const scatterShort = DATA.short_entries.map(p => ({{ x: p.time.slice(5, 16), y: p.price }}));
-const scatterTP = DATA.tp_exits.map(p => ({{ x: p.time.slice(5, 16), y: p.price }}));
-const scatterSL = DATA.sl_exits.map(p => ({{ x: p.time.slice(5, 16), y: p.price }}));
+const timeIndex = new Map();
+DATA.times.forEach((t, i) => timeIndex.set(t, i));
+const sparseSeries = pts => {{
+    const arr = new Array(DATA.times.length).fill(null);
+    pts.forEach(p => {{
+        const i = timeIndex.get(p.time);
+        if (i !== undefined) arr[i] = p.price;
+    }});
+    return arr;
+}};
+const longSeries = sparseSeries(DATA.long_entries);
+const shortSeries = sparseSeries(DATA.short_entries);
+const tpSeries = sparseSeries(DATA.tp_exits);
+const slSeries = sparseSeries(DATA.sl_exits);
 
 addChart('{pair_label} — Price + Trade Markers', {{
     type: 'line',
@@ -334,20 +343,28 @@ addChart('{pair_label} — Price + Trade Markers', {{
                 borderColor: '#f0f6fc', borderWidth: 1, pointRadius: 0, tension: 0,
             }},
             {{
-                label: 'Long entries', type: 'scatter', data: scatterLong,
-                backgroundColor: '#3fb950', pointRadius: 4, pointStyle: 'triangle',
+                label: 'Long entries', data: longSeries,
+                showLine: false, spanGaps: false,
+                backgroundColor: '#3fb950', borderColor: '#3fb950',
+                pointRadius: 4, pointStyle: 'triangle',
             }},
             {{
-                label: 'Short entries', type: 'scatter', data: scatterShort,
-                backgroundColor: '#f85149', pointRadius: 4, pointStyle: 'triangle', rotation: 180,
+                label: 'Short entries', data: shortSeries,
+                showLine: false, spanGaps: false,
+                backgroundColor: '#f85149', borderColor: '#f85149',
+                pointRadius: 4, pointStyle: 'triangle', rotation: 180,
             }},
             {{
-                label: 'TP exits', type: 'scatter', data: scatterTP,
-                backgroundColor: '#58a6ff', pointRadius: 3, pointStyle: 'circle',
+                label: 'TP exits', data: tpSeries,
+                showLine: false, spanGaps: false,
+                backgroundColor: '#58a6ff', borderColor: '#58a6ff',
+                pointRadius: 3, pointStyle: 'circle',
             }},
             {{
-                label: 'SL exits', type: 'scatter', data: scatterSL,
-                backgroundColor: '#db6d28', pointRadius: 3, pointStyle: 'crossRot',
+                label: 'SL exits', data: slSeries,
+                showLine: false, spanGaps: false,
+                backgroundColor: '#db6d28', borderColor: '#db6d28',
+                pointRadius: 3, pointStyle: 'crossRot',
             }},
         ],
     }},
@@ -401,7 +418,6 @@ def main():
     _ = parser.parse_args()
 
     data = download_all(force=False)
-    _ = ALL_SYMBOLS  # kept for future multi-symbol work
     run_visual_backtest(data)
 
 

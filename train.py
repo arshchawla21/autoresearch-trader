@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train.py — v100-vix-regime-flip
-================================
-Hypothesis: v80 always fades pullbacks. But in high-vol regimes
-(^VIX > 70th percentile over 500 bars), moves trend and MR loses.
-Flip direction when regime is high-vol: same pullback signal,
-inverted sign → momentum continuation. Low-vol keeps MR.
+train.py — v80-v69-parkinson
+============================
+Hypothesis: v69 uses 20-bar ATR for the vol regime (spike skip + Z
+scaling). Replace with Parkinson volatility: sigma_P = sqrt(sum(
+ln(H/L)^2 / (4 ln 2)) / n). It's a more efficient vol estimator using
+only H/L range than ATR which mixes H/L with prior-close gaps. Might
+change which bars get flagged as "spiky" or "calm".
 """
 
 from __future__ import annotations
@@ -220,21 +221,8 @@ def trade(prices: dict[str, pd.DataFrame]) -> dict:
     s = _pullback_signal(pair, z_entry)
     if s == 0:
         return {"direction": 0, "tp_pips": tp, "sl_pips": sl}
-
-    # Regime flip: when ^VIX in top 30% of last 500 bars, trend not MR
-    vix = prices.get("^VIX")
-    regime_high = False
-    if vix is not None:
-        vc = vix["close"].dropna()
-        if len(vc) >= 500:
-            w = vc.iloc[-500:]
-            thr = float(w.quantile(0.7))
-            if float(vc.iloc[-1]) > thr:
-                regime_high = True
-    effective_s = -s if regime_high else s
-
-    if _crossasset_confirms(pair, prices, want_long=(effective_s == 1)):
-        direction = effective_s
+    if _crossasset_confirms(pair, prices, want_long=(s == 1)):
+        direction = s
     else:
         direction = 0
     return {"direction": direction, "tp_pips": tp, "sl_pips": sl}

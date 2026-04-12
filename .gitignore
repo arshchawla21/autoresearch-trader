@@ -19,3 +19,6 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 .claude
+
+# Credentials
+.env
